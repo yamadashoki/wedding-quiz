@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&family=M+PLUS+Rounded+1c:wght@700;800;900&family=Orbitron:wght@700;900&display=swap');
+
+:root {
+  --wedding-pink: #FF6B9D;
+  --wedding-gold: #FFD700;
+  --wedding-rose: #FF4081;
+  --wedding-cream: #FFF8E7;
+  --wedding-champagne: #F7E7CE;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Noto Sans JP', sans-serif;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* スロット数字のスタイル */
+.slot-digit {
+  font-family: 'Orbitron', monospace;
+  font-weight: 900;
+  display: inline-block;
+  min-width: 0.7em;
+  text-align: center;
+}
+
+/* 紙吹雪パーティクル */
+@keyframes confetti-fall {
+  0% {
+    transform: translateY(-10vh) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(110vh) rotate(720deg);
+    opacity: 0;
+  }
+}
+
+.confetti-particle {
+  position: fixed;
+  top: -10px;
+  animation: confetti-fall linear forwards;
+  z-index: 100;
+  pointer-events: none;
+}
+
+/* フラッシュ効果 */
+@keyframes flash-screen {
+  0% { background-color: rgba(255, 255, 255, 0.9); }
+  100% { background-color: transparent; }
+}
+
+.flash-overlay {
+  position: fixed;
+  inset: 0;
+  animation: flash-screen 0.6s ease-out forwards;
+  z-index: 90;
+  pointer-events: none;
+}
+
+/* キラキラエフェクト */
+@keyframes sparkle {
+  0%, 100% { opacity: 0; transform: scale(0) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1) rotate(180deg); }
+}
+
+.sparkle {
+  position: fixed;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+  z-index: 95;
+}
+
+.sparkle::before {
+  content: '✦';
+  font-size: 20px;
+  color: var(--wedding-gold);
+  animation: sparkle 1.5s ease-in-out infinite;
+}
+
+/* 100分の1達成テキスト */
+@keyframes achievement-text {
+  0% { transform: scale(0) rotate(-10deg); opacity: 0; }
+  50% { transform: scale(1.2) rotate(3deg); }
+  70% { transform: scale(0.95) rotate(-1deg); }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+.achievement-text {
+  animation: achievement-text 0.8s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+}
+
+/* グラデーション背景アニメーション */
+@keyframes gradient-shift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.animated-gradient {
+  background-size: 200% 200%;
+  animation: gradient-shift 4s ease infinite;
+}
+
+/* YES/NOボタンの押下効果 */
+.btn-press {
+  transition: transform 0.1s, box-shadow 0.1s;
+}
+.btn-press:active {
+  transform: scale(0.95);
+  box-shadow: none;
+}
+
+/* スマホでの全画面表示 */
+.mobile-fullscreen {
+  min-height: 100dvh;
+}
+
+/* スクリーン画面のグラデーション背景 */
+.screen-bg {
+  background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
+  min-height: 100vh;
+}
+
+/* ゴールドグラデーション文字 */
+.text-gold-gradient {
+  background: linear-gradient(135deg, #FFD700, #FFA500, #FFD700);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ネオングロー効果 */
+.neon-glow {
+  text-shadow: 
+    0 0 10px rgba(255, 215, 0, 0.5),
+    0 0 20px rgba(255, 215, 0, 0.3),
+    0 0 40px rgba(255, 215, 0, 0.2),
+    0 0 80px rgba(255, 215, 0, 0.1);
+}
+
+/* パルスリング */
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(2); opacity: 0; }
+}
+
+.pulse-ring::before {
+  content: '';
+  position: absolute;
+  inset: -10px;
+  border: 3px solid var(--wedding-gold);
+  border-radius: inherit;
+  animation: pulse-ring 1.5s ease-out infinite;
+}
