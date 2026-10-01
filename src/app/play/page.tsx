@@ -155,7 +155,7 @@ export default function PlayPage() {
         <div className="text-center">
           <div className="text-6xl mb-6 animate-pulse-slow">🎊</div>
           <h1 className="font-display text-3xl font-black mb-4">
-            100分の1アンケート
+            1人を目指せ！
           </h1>
           <p className="text-xl text-pink-200 mb-2">次の質問を待っています...</p>
           <div className="mt-8 flex items-center gap-2 justify-center text-pink-300/60">

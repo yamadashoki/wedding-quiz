@@ -112,7 +112,7 @@ export default function ScreenPage() {
       setRevealedCount(gameData.yes_count);
       setIsRevealed(true);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameData]);
 
   // スロットアニメーション開始
@@ -199,7 +199,7 @@ export default function ScreenPage() {
     return () => {
       stopSlotAnimation();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const game = gameData.game;
@@ -215,7 +215,7 @@ export default function ScreenPage() {
       <main className="screen-bg flex flex-col items-center justify-center text-white">
         <div className="text-center">
           <h1 className="font-display text-7xl md:text-9xl font-black mb-6 text-gold-gradient neon-glow">
-            100分の1
+            1人を目指せ！
           </h1>
           <p className="font-display text-3xl md:text-5xl font-bold text-purple-300">
             アンケート
@@ -353,7 +353,7 @@ export default function ScreenPage() {
                 </span>
               </div>
               <div className="relative">
-                <h2
+                {/* <h2
                   className="font-display text-5xl md:text-7xl lg:text-8xl font-black"
                   style={{
                     background: "linear-gradient(135deg, #FFD700, #FF6B9D, #FF4081, #FFD700)",
@@ -365,7 +365,7 @@ export default function ScreenPage() {
                   }}
                 >
                   100分の1
-                </h2>
+                </h2> */}
                 <h2
                   className="font-display text-5xl md:text-7xl lg:text-8xl font-black mt-2"
                   style={{
