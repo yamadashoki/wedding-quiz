@@ -142,7 +142,7 @@ export default function ScreenPage() {
     setRevealedCount(yesCount);
     setIsRevealed(true);
 
-    // 100分の1達成チェック
+    // 1人達成チェック
     if (yesCount === 1) {
       setTimeout(() => {
         triggerAchievement();
@@ -150,7 +150,7 @@ export default function ScreenPage() {
     }
   };
 
-  // 100分の1達成演出
+  // 1人達成演出
   const triggerAchievement = () => {
     // フラッシュ
     setShowFlash(true);
@@ -343,7 +343,7 @@ export default function ScreenPage() {
           )}
         </div>
 
-        {/* 100分の1達成演出 */}
+        {/* 1人達成演出 */}
         {showAchievement && (
           <div className="fixed inset-0 flex items-center justify-center z-50 bg-black/50">
             <div className="text-center achievement-text">

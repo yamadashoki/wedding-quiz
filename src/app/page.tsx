@@ -6,10 +6,10 @@ export default function HomePage() {
       <div className="text-center max-w-md mx-auto">
         <div className="mb-8">
           <h1 className="font-display text-5xl md:text-6xl font-black mb-4 text-gold-gradient drop-shadow-lg">
-            100分の1
+            1人を目指せ！
           </h1>
           <p className="font-display text-2xl md:text-3xl font-bold text-wedding-champagne">
-            アンケート
+            YES/NOゲーム
           </p>
         </div>
 

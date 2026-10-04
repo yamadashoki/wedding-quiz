@@ -39,6 +39,7 @@ body {
     transform: translateY(-10vh) rotate(0deg);
     opacity: 1;
   }
+
   100% {
     transform: translateY(110vh) rotate(720deg);
     opacity: 0;
@@ -55,8 +56,13 @@ body {
 
 /* フラッシュ効果 */
 @keyframes flash-screen {
-  0% { background-color: rgba(255, 255, 255, 0.9); }
-  100% { background-color: transparent; }
+  0% {
+    background-color: rgba(255, 255, 255, 0.9);
+  }
+
+  100% {
+    background-color: transparent;
+  }
 }
 
 .flash-overlay {
@@ -69,8 +75,17 @@ body {
 
 /* キラキラエフェクト */
 @keyframes sparkle {
-  0%, 100% { opacity: 0; transform: scale(0) rotate(0deg); }
-  50% { opacity: 1; transform: scale(1) rotate(180deg); }
+
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0) rotate(0deg);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1) rotate(180deg);
+  }
 }
 
 .sparkle {
@@ -88,12 +103,25 @@ body {
   animation: sparkle 1.5s ease-in-out infinite;
 }
 
-/* 100分の1達成テキスト */
+/* 1人達成テキスト */
 @keyframes achievement-text {
-  0% { transform: scale(0) rotate(-10deg); opacity: 0; }
-  50% { transform: scale(1.2) rotate(3deg); }
-  70% { transform: scale(0.95) rotate(-1deg); }
-  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+  0% {
+    transform: scale(0) rotate(-10deg);
+    opacity: 0;
+  }
+
+  50% {
+    transform: scale(1.2) rotate(3deg);
+  }
+
+  70% {
+    transform: scale(0.95) rotate(-1deg);
+  }
+
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
 }
 
 .achievement-text {
@@ -102,9 +130,17 @@ body {
 
 /* グラデーション背景アニメーション */
 @keyframes gradient-shift {
-  0% { background-position: 0% 50%; }
-  50% { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
 }
 
 .animated-gradient {
@@ -116,6 +152,7 @@ body {
 .btn-press {
   transition: transform 0.1s, box-shadow 0.1s;
 }
+
 .btn-press:active {
   transform: scale(0.95);
   box-shadow: none;
@@ -142,7 +179,7 @@ body {
 
 /* ネオングロー効果 */
 .neon-glow {
-  text-shadow: 
+  text-shadow:
     0 0 10px rgba(255, 215, 0, 0.5),
     0 0 20px rgba(255, 215, 0, 0.3),
     0 0 40px rgba(255, 215, 0, 0.2),
@@ -151,8 +188,15 @@ body {
 
 /* パルスリング */
 @keyframes pulse-ring {
-  0% { transform: scale(0.8); opacity: 1; }
-  100% { transform: scale(2); opacity: 0; }
+  0% {
+    transform: scale(0.8);
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
 }
 
 .pulse-ring::before {
