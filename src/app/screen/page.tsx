@@ -27,7 +27,6 @@ export default function ScreenPage() {
   const [slotDigitOnes, setSlotDigitOnes] = useState(0);
   const [isRevealed, setIsRevealed] = useState(false);
   const [revealedCount, setRevealedCount] = useState<number | null>(null);
-  const [showAchievement, setShowAchievement] = useState(false);
   const [showFlash, setShowFlash] = useState(false);
   const [confetti, setConfetti] = useState<ConfettiParticle[]>([]);
   const [sparkles, setSparkles] = useState<{ id: number; left: number; top: number; delay: number }[]>([]);
@@ -71,7 +70,6 @@ export default function ScreenPage() {
       prevGameIdRef.current = currentGameId;
       setIsRevealed(false);
       setRevealedCount(null);
-      setShowAchievement(false);
       setShowFlash(false);
       setConfetti([]);
       setSparkles([]);
@@ -86,7 +84,6 @@ export default function ScreenPage() {
         // 回答開始 → スロットアニメーション開始
         setIsRevealed(false);
         setRevealedCount(null);
-        setShowAchievement(false);
         setShowFlash(false);
         setConfetti([]);
         setSparkles([]);
@@ -102,9 +99,6 @@ export default function ScreenPage() {
         if (gameData.yes_count !== undefined) {
           setRevealedCount(gameData.yes_count);
           setIsRevealed(true);
-          if (gameData.yes_count === 1) {
-            setTimeout(() => setShowAchievement(true), 1500);
-          }
         }
       }
     } else if (currentStatus === "revealed" && revealedCount === null && gameData.yes_count !== undefined) {
@@ -141,58 +135,9 @@ export default function ScreenPage() {
     // 数字表示
     setRevealedCount(yesCount);
     setIsRevealed(true);
-
-    // 1人達成チェック
-    if (yesCount === 1) {
-      setTimeout(() => {
-        triggerAchievement();
-      }, 2000);
-    }
   };
 
-  // 1人達成演出
-  const triggerAchievement = () => {
-    // フラッシュ
-    setShowFlash(true);
-    setTimeout(() => setShowFlash(false), 600);
 
-    // 紙吹雪生成
-    const colors = [
-      "#FFD700", "#FF6B9D", "#FF4081", "#4FC3F7",
-      "#81C784", "#FFB74D", "#E040FB", "#FF5252",
-      "#69F0AE", "#40C4FF", "#FFAB40", "#7C4DFF",
-    ];
-    const particles: ConfettiParticle[] = [];
-    for (let i = 0; i < 80; i++) {
-      const shapes: ("square" | "circle" | "triangle")[] = ["square", "circle", "triangle"];
-      particles.push({
-        id: i,
-        left: Math.random() * 100,
-        size: Math.random() * 12 + 6,
-        color: colors[Math.floor(Math.random() * colors.length)],
-        delay: Math.random() * 2,
-        duration: Math.random() * 3 + 2,
-        rotation: Math.random() * 360,
-        shape: shapes[Math.floor(Math.random() * shapes.length)],
-      });
-    }
-    setConfetti(particles);
-
-    // キラキラ
-    const newSparkles = [];
-    for (let i = 0; i < 20; i++) {
-      newSparkles.push({
-        id: i,
-        left: Math.random() * 100,
-        top: Math.random() * 100,
-        delay: Math.random() * 2,
-      });
-    }
-    setSparkles(newSparkles);
-
-    // テキスト表示
-    setShowAchievement(true);
-  };
 
   // クリーンアップ
   useEffect(() => {
@@ -209,25 +154,6 @@ export default function ScreenPage() {
     return n.toString().padStart(2, "0");
   };
 
-  // 待機画面（ゲームなし or waiting）
-  if (!game || game.status === "waiting") {
-    return (
-      <main className="screen-bg flex flex-col items-center justify-center text-white">
-        <div className="text-center">
-          <h1 className="font-display text-7xl md:text-9xl font-black mb-6 text-gold-gradient neon-glow">
-            1人を目指せ！
-          </h1>
-          <p className="font-display text-3xl md:text-5xl font-bold text-purple-300">
-            アンケート
-          </p>
-          <div className="mt-12 text-2xl text-purple-400/60 animate-pulse">
-            次の質問をお待ちください...
-          </div>
-        </div>
-      </main>
-    );
-  }
-
   // 表示する数字
   const displayTens = isRevealed && revealedCount !== null
     ? Math.floor(revealedCount / 10)
@@ -235,6 +161,22 @@ export default function ScreenPage() {
   const displayOnes = isRevealed && revealedCount !== null
     ? revealedCount % 10
     : slotDigitOnes;
+
+  // 待機画面（ゲームなし or waiting）
+  if (!game || game.status === "waiting") {
+    return (
+      <main className="screen-bg flex flex-col items-center justify-center text-white">
+        <div className="text-center">
+          <h1 className="font-display text-6xl md:text-8xl font-black mb-6 text-gold-gradient neon-glow">
+            アンケートビンゴ
+          </h1>
+          <div className="mt-12 text-2xl text-purple-400/60 animate-pulse">
+            次の質問をお待ちください...
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="screen-bg flex flex-col items-center justify-center text-white relative overflow-hidden">
@@ -336,69 +278,18 @@ export default function ScreenPage() {
 
           {/* 回答中のインジケーター */}
           {!isRevealed && (
-            <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 flex gap-2">
+            <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2">
               <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse"></div>
               <span className="text-red-400 text-sm font-bold tracking-wider">LIVE</span>
             </div>
           )}
         </div>
 
-        {/* 1人達成演出 */}
-        {showAchievement && (
-          <div className="fixed inset-0 flex items-center justify-center z-50 bg-black/50">
-            <div className="text-center achievement-text">
-              <div className="mb-4">
-                <span className="font-mono text-[8rem] md:text-[12rem] font-black text-wedding-gold neon-glow">
-                  01
-                </span>
-              </div>
-              <div className="relative">
-                {/* <h2
-                  className="font-display text-5xl md:text-7xl lg:text-8xl font-black"
-                  style={{
-                    background: "linear-gradient(135deg, #FFD700, #FF6B9D, #FF4081, #FFD700)",
-                    backgroundSize: "200% 200%",
-                    WebkitBackgroundClip: "text",
-                    WebkitTextFillColor: "transparent",
-                    animation: "gradient-shift 2s ease infinite",
-                    filter: "drop-shadow(0 0 30px rgba(255,215,0,0.5))",
-                  }}
-                >
-                  100分の1
-                </h2> */}
-                <h2
-                  className="font-display text-5xl md:text-7xl lg:text-8xl font-black mt-2"
-                  style={{
-                    background: "linear-gradient(135deg, #FF4081, #FFD700, #FF6B9D, #FF4081)",
-                    backgroundSize: "200% 200%",
-                    WebkitBackgroundClip: "text",
-                    WebkitTextFillColor: "transparent",
-                    animation: "gradient-shift 2s ease infinite 0.5s",
-                    filter: "drop-shadow(0 0 30px rgba(255,64,129,0.5))",
-                  }}
-                >
-                  達成！！
-                </h2>
-              </div>
-              <div className="mt-6 flex justify-center gap-4 text-5xl animate-bounce">
-                <span>🎊</span>
-                <span>🎉</span>
-                <span>✨</span>
-                <span>🎊</span>
-                <span>🎉</span>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* 結果表示時のサブ情報 */}
-        {isRevealed && revealedCount !== null && !showAchievement && (
-          <div className="mt-12 animate-fade-in">
+        {isRevealed && revealedCount !== null && (
+          <div className="mt-8 animate-fade-in">
             <p className="text-3xl md:text-4xl font-bold text-purple-300">
-              {revealedCount === 0 && "0人でした！"}
-              {revealedCount === 1 && "たった1人！"}
-              {revealedCount !== null && revealedCount >= 2 && revealedCount <= 5 && `${revealedCount}人！少数派！`}
-              {revealedCount !== null && revealedCount > 5 && `${revealedCount}人！`}
+              YESの回答数: {revealedCount}人
             </p>
           </div>
         )}

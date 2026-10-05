@@ -187,7 +187,7 @@ export default function HostPage() {
         {/* ヘッダー */}
         <div className="text-center mb-6">
           <h1 className="text-3xl font-bold text-white mb-1">🎤 司会者コントロール</h1>
-          <p className="text-purple-300 text-sm">1人を目指せ！</p>
+          <p className="text-purple-300 text-sm">アンケートビンゴ</p>
         </div>
 
         {/* エラー表示 */}

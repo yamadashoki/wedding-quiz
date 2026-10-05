@@ -7,10 +7,10 @@ export default function FiftyGamePage() {
         <div className="mb-6">
           <span className="inline-block text-4xl mb-2">🎰</span>
           <h1 className="font-display text-4xl md:text-5xl font-black mb-2 text-gold-gradient drop-shadow-lg">
-            50分の1アンケート
+            アンケートビンゴ
           </h1>
           <p className="font-display text-xl md:text-2xl font-bold text-wedding-champagne">
-            1人を目指せ！YES/NOゲーム
+            YES/NO リアルタイム集計ゲーム
           </p>
         </div>
 

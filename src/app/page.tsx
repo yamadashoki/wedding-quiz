@@ -46,7 +46,7 @@ export default function GameSelectPage() {
             </div>
           </Link>
 
-          {/* 50分の1アンケートゲーム */}
+          {/* アンケートビンゴ */}
           <Link
             href="/fifty"
             className="group relative block w-full p-6 rounded-3xl bg-gradient-to-r from-pink-500/90 via-rose-500/90 to-purple-600/90 hover:from-pink-400 hover:via-rose-400 hover:to-purple-500 text-white shadow-xl hover:shadow-2xl transform hover:-translate-y-1 transition-all duration-300 border border-pink-300/40 overflow-hidden text-left"
@@ -58,10 +58,10 @@ export default function GameSelectPage() {
                 </span>
                 <div>
                   <h2 className="font-display text-2xl md:text-3xl font-black text-white drop-shadow-sm">
-                    50分の1アンケートゲーム
+                    アンケートビンゴ
                   </h2>
                   <p className="text-xs md:text-sm text-pink-100/90 mt-1">
-                    会場の中でたった1人を目指すYES/NO心理バトル！
+                    会場参加型のYES/NOリアルタイムアンケートゲーム！
                   </p>
                 </div>
               </div>
