@@ -1,47 +1,80 @@
 import Link from "next/link";
 
-export default function HomePage() {
+export default function GameSelectPage() {
   return (
     <main className="mobile-fullscreen flex flex-col items-center justify-center bg-gradient-to-br from-purple-900 via-pink-800 to-rose-700 animated-gradient text-white p-6">
-      <div className="text-center max-w-md mx-auto">
-        <div className="mb-8">
-          <h1 className="font-display text-5xl md:text-6xl font-black mb-4 text-gold-gradient drop-shadow-lg">
-            1人を目指せ！
+      <div className="text-center max-w-lg mx-auto w-full">
+        {/* ヘッダータイトル */}
+        <div className="mb-10">
+          <div className="inline-block px-4 py-1.5 rounded-full bg-amber-400/20 border border-amber-300/40 text-amber-200 text-xs md:text-sm font-semibold tracking-wider uppercase mb-3 shadow-sm">
+            ✨ Wedding Party Games ✨
+          </div>
+          <h1 className="font-display text-4xl md:text-6xl font-black mb-3 text-gold-gradient drop-shadow-lg neon-glow">
+            ゲームを選択してください
           </h1>
-          <p className="font-display text-2xl md:text-3xl font-bold text-wedding-champagne">
-            YES/NOゲーム
+          <p className="text-base md:text-lg text-pink-200/90 font-medium">
+            パーティーを盛り上げるゲームを選んでスタート！
           </p>
         </div>
 
-        <div className="mb-4 text-lg text-pink-200 opacity-80">
-          結婚式二次会ゲーム
+        {/* ゲーム選択ボタン一覧 */}
+        <div className="space-y-5 w-full">
+          {/* 3連単アンケートゲーム */}
+          <Link
+            href="/trifecta"
+            className="group relative block w-full p-6 rounded-3xl bg-gradient-to-r from-amber-500/90 via-orange-500/90 to-red-500/90 hover:from-amber-400 hover:via-orange-400 hover:to-red-400 text-white shadow-xl hover:shadow-2xl transform hover:-translate-y-1 transition-all duration-300 border border-amber-300/40 overflow-hidden text-left"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-4">
+                <span className="text-4xl md:text-5xl group-hover:scale-110 transition-transform duration-300">
+                  🎯
+                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="font-display text-2xl md:text-3xl font-black text-white drop-shadow-sm">
+                      3連単アンケートゲーム
+                    </h2>
+                  </div>
+                  <p className="text-xs md:text-sm text-amber-100/90 mt-1">
+                    上位3つを予想して連続的中を目指せ！（準備中）
+                  </p>
+                </div>
+              </div>
+              <span className="text-2xl opacity-70 group-hover:opacity-100 group-hover:translate-x-1 transition-all">
+                ➔
+              </span>
+            </div>
+          </Link>
+
+          {/* 50分の1アンケートゲーム */}
+          <Link
+            href="/fifty"
+            className="group relative block w-full p-6 rounded-3xl bg-gradient-to-r from-pink-500/90 via-rose-500/90 to-purple-600/90 hover:from-pink-400 hover:via-rose-400 hover:to-purple-500 text-white shadow-xl hover:shadow-2xl transform hover:-translate-y-1 transition-all duration-300 border border-pink-300/40 overflow-hidden text-left"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-4">
+                <span className="text-4xl md:text-5xl group-hover:scale-110 transition-transform duration-300">
+                  🎰
+                </span>
+                <div>
+                  <h2 className="font-display text-2xl md:text-3xl font-black text-white drop-shadow-sm">
+                    50分の1アンケートゲーム
+                  </h2>
+                  <p className="text-xs md:text-sm text-pink-100/90 mt-1">
+                    会場の中でたった1人を目指すYES/NO心理バトル！
+                  </p>
+                </div>
+              </div>
+              <span className="text-2xl opacity-70 group-hover:opacity-100 group-hover:translate-x-1 transition-all">
+                ➔
+              </span>
+            </div>
+          </Link>
         </div>
 
-        <div className="space-y-4 w-full">
-          <Link
-            href="/play"
-            className="block w-full py-5 px-8 rounded-2xl bg-gradient-to-r from-pink-500 to-rose-500 text-white text-xl font-bold shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-200 text-center"
-          >
-            🎉 参加する（ゲスト）
-          </Link>
-
-          <Link
-            href="/screen"
-            className="block w-full py-4 px-8 rounded-2xl bg-gradient-to-r from-indigo-500 to-purple-500 text-white text-lg font-bold shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-200 text-center"
-          >
-            📺 スクリーン表示
-          </Link>
-
-          <Link
-            href="/host"
-            className="block w-full py-3 px-8 rounded-2xl bg-white/20 backdrop-blur-sm text-white text-base font-medium border border-white/30 hover:bg-white/30 transition-all duration-200 text-center"
-          >
-            🎤 司会者ログイン
-          </Link>
-        </div>
-
-        <p className="mt-8 text-sm text-pink-300/60">
-          スマートフォンからアクセスしてお楽しみください
+        {/* フッターコメント */}
+        <p className="mt-10 text-xs text-pink-300/60">
+          結婚式二次会・各種パーティー向けリアルタイムインタラクティブゲーム
         </p>
       </div>
     </main>
