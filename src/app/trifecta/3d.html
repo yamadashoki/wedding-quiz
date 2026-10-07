@@ -1,0 +1,2140 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ウェディング・サンレンタン 3D競馬 本番運用システム</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Montserrat:wght@700;800;900&display=swap');
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #030712;
+            color: #f3f4f6;
+            font-family: 'Zen Kaku Gothic New', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            user-select: none;
+            overflow-x: hidden;
+            letter-spacing: 0.02em;
+        }
+
+        .font-num {
+            font-family: 'Montserrat', 'Zen Kaku Gothic New', sans-serif;
+        }
+
+        ::-webkit-scrollbar {
+            width: 5px;
+            height: 5px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.6);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(217, 119, 6, 0.3);
+            border-radius: 9999px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(217, 119, 6, 0.6);
+        }
+
+        #canvas-box {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            inset: 0;
+            overflow: hidden;
+            background: #8ec5ee;
+        }
+
+        #canvas-box canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+        }
+    </style>
+</head>
+
+<body class="min-h-screen flex flex-col justify-between bg-slate-950">
+
+    <header
+        class="bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-50 shadow-sm">
+        <div class="flex items-center gap-3">
+            <div
+                class="w-9 h-9 rounded-xl bg-slate-800 border border-amber-500/30 flex items-center justify-center text-amber-300 text-lg shadow-sm">
+                🏇
+            </div>
+            <div>
+                <div class="font-bold text-sm tracking-wider text-slate-100 flex items-center gap-2">
+                    <span class="font-num tracking-widest text-xs font-black text-amber-300/90">WEDDING DERBY 3D</span>
+                    <span id="current-round-badge"
+                        class="bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] px-2 py-0.5 rounded font-medium">
+                        第1R / 全3R
+                    </span>
+                </div>
+                <div class="text-[11px] text-slate-400 hidden sm:block">披露宴・二次会 連続レース進行システム</div>
+            </div>
+        </div>
+
+        <!-- 画面表示切替タブ -->
+        <div class="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800">
+            <button id="tab-all" onclick="switchLayout('all')"
+                class="px-3 py-1 rounded-lg text-xs font-bold transition-all bg-amber-500 text-slate-950 shadow-sm">
+                3画面同時
+            </button>
+            <button id="tab-monitor-only" onclick="switchLayout('monitor')"
+                class="px-3 py-1 rounded-lg text-xs font-medium transition-all text-slate-400 hover:text-slate-200">
+                会場モニター
+            </button>
+            <button id="tab-phone-only" onclick="switchLayout('phone')"
+                class="px-3 py-1 rounded-lg text-xs font-medium transition-all text-slate-400 hover:text-slate-200">
+                スマホ投票
+            </button>
+            <button id="tab-admin-only" onclick="switchLayout('admin')"
+                class="px-3 py-1 rounded-lg text-xs font-medium transition-all text-slate-400 hover:text-slate-200">
+                幹事操作
+            </button>
+        </div>
+
+        <!-- サウンド＆状態表示 -->
+        <div class="flex items-center gap-2.5">
+            <button id="btn-sound" onclick="toggleSound()"
+                class="p-1.5 px-3 rounded-lg border border-slate-700 text-xs font-medium bg-slate-800/80 text-slate-300 hover:text-white transition-all flex items-center gap-1.5 shadow-sm">
+                <span id="sound-icon">🔊</span>
+                <span id="sound-text">SOUND ON</span>
+            </button>
+
+            <div id="badge-cloud"
+                class="px-2.5 py-1 rounded-full font-medium text-[10px] border tracking-wide bg-slate-900 text-slate-400 border-slate-800 flex items-center gap-1.5">
+                <span id="cloud-dot" class="w-1.5 h-1.5 rounded-full bg-slate-500"></span>
+                <span id="cloud-label">ローカル模擬</span>
+            </div>
+
+            <div id="badge-status"
+                class="px-3 py-1 rounded-full font-medium text-[11px] border tracking-wide bg-slate-900 text-slate-300 border-slate-800 flex items-center gap-2">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+                <span id="status-label">第1R 投票受付中</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 p-3 md:p-5 flex flex-col justify-start relative max-w-7xl mx-auto w-full">
+        <!-- 概要ガイドバー -->
+        <div id="guide-banner"
+            class="mb-4 bg-slate-900/80 border border-slate-800 rounded-2xl p-3 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3 text-slate-200">
+            <div class="flex items-center gap-2">
+                <span class="text-amber-400 text-base">📌</span>
+                <span class="text-xs text-slate-300">
+                    全レースを通して獲得したポイントが累積加算されます。最終レース終了後に<strong class="text-amber-300">「総合優勝・表彰式」</strong>を開催できます！
+                </span>
+            </div>
+            <div class="flex items-center gap-2">
+                <span id="guide-current-race"
+                    class="text-xs text-amber-300/90 font-medium bg-slate-950 px-3 py-1 rounded-lg border border-amber-500/20">
+                    第1R：新婦の手料理杯
+                </span>
+            </div>
+        </div>
+
+        <!-- 3画面グリッドレイアウト -->
+        <div id="main-grid" class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+
+            <!-- ① ゲスト用スマホ画面 -->
+            <div id="panel-phone" class="lg:col-span-4 flex flex-col items-center w-full">
+                <div class="w-full flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
+                    <span class="flex items-center gap-1.5 text-slate-200">
+                        📱 ① ゲスト用スマホ（投票・馬券）
+                    </span>
+                    <span class="text-[11px] text-slate-500 font-num">MOBILE</span>
+                </div>
+
+                <div
+                    class="w-full max-w-[360px] h-[670px] bg-slate-950 rounded-[40px] p-2.5 shadow-xl border border-slate-800 relative overflow-hidden flex flex-col">
+                    <div id="phone-content"
+                        class="w-full h-full rounded-[30px] overflow-y-auto bg-slate-950 border border-slate-900 relative pt-1">
+                        <!-- JSでスマホUIを描画 -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- ② 会場プロジェクター（3D競馬中継） -->
+            <div id="panel-monitor" class="lg:col-span-5 flex flex-col w-full">
+                <div class="flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
+                    <span class="flex items-center gap-1.5 text-slate-200">
+                        📺 ② 会場プロジェクター（3D中継）
+                    </span>
+                    <span class="text-[11px] text-amber-400/80 font-num font-semibold">WEBGL 60FPS</span>
+                </div>
+
+                <div
+                    class="w-full h-[670px] bg-slate-950 rounded-2xl shadow-xl border border-slate-800 overflow-hidden flex flex-col relative">
+                    <!-- 3D Canvas マウントコンテナ -->
+                    <div id="canvas-box"></div>
+
+                    <!-- モニター上部：オッズ板 ＆ カメラ切替 -->
+                    <div class="absolute top-0 inset-x-0 p-3 z-20 flex items-start justify-between pointer-events-none">
+                        <!-- 左上：オッズボード -->
+                        <div
+                            class="bg-slate-950/85 backdrop-blur-md border border-slate-800 rounded-xl p-2.5 shadow-lg text-xs w-48 font-num pointer-events-auto">
+                            <div
+                                class="text-[10px] font-bold text-slate-400 border-b border-slate-800 pb-1 mb-1.5 flex justify-between tracking-wider">
+                                <span id="odds-race-title">第1R 出走馬</span>
+                                <span>単勝</span>
+                            </div>
+                            <div id="odds-board-list" class="space-y-1">
+                                <!-- JSで展開 -->
+                            </div>
+                        </div>
+
+                        <!-- 右上：カメラ切り替え ＆ 残りメーター -->
+                        <div class="flex flex-col items-end gap-2 pointer-events-auto">
+                            <div
+                                class="flex gap-1 bg-slate-950/85 backdrop-blur-md p-1 rounded-lg border border-slate-800 shadow-md">
+                                <button id="btn-cam-follow" onclick="setCam('follow')"
+                                    class="px-2.5 py-1 text-[11px] font-bold rounded bg-amber-500 text-slate-950 shadow-sm">
+                                    追走
+                                </button>
+                                <button id="btn-cam-side" onclick="setCam('side')"
+                                    class="px-2.5 py-1 text-[11px] font-medium rounded text-slate-400 hover:text-white">
+                                    サイド
+                                </button>
+                                <button id="btn-cam-front" onclick="setCam('front')"
+                                    class="px-2.5 py-1 text-[11px] font-medium rounded text-slate-400 hover:text-white">
+                                    正面
+                                </button>
+                                <button id="btn-cam-top" onclick="setCam('top')"
+                                    class="px-2.5 py-1 text-[11px] font-medium rounded text-slate-400 hover:text-white">
+                                    俯瞰
+                                </button>
+                            </div>
+
+                            <div
+                                class="bg-slate-950/90 border border-slate-800 px-3 py-1.5 rounded-lg flex items-center gap-2 shadow-md">
+                                <span class="text-[10px] text-slate-400 font-num font-bold tracking-wider">REMAIN</span>
+                                <span id="remain-dist-display"
+                                    class="font-num text-lg text-amber-300 font-bold leading-none">400</span>
+                                <span class="text-xs text-slate-400">m</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 各レース確定結果モーダル -->
+                    <div id="result-overlay"
+                        class="hidden absolute inset-0 z-40 bg-slate-950/90 backdrop-blur-md flex flex-col items-center justify-center p-5 text-center">
+                        <div class="w-full max-w-sm bg-slate-900 border border-amber-500/40 rounded-2xl p-5 shadow-2xl">
+                            <div
+                                class="inline-flex items-center gap-1.5 bg-amber-500/20 text-amber-300 font-bold px-3 py-1 rounded-full text-[11px] tracking-wider mb-2 border border-amber-500/30">
+                                <span id="modal-round-tag">第1R 着順確定</span>
+                            </div>
+                            <h2 class="text-lg font-bold text-slate-100 mb-2">
+                                サンレンタン確定結果
+                            </h2>
+                            <div id="result-podium-list" class="space-y-2 mb-3"></div>
+
+                            <!-- 連続進行用のアクションボタン -->
+                            <div class="space-y-2 pt-1">
+                                <button id="btn-modal-next-race" onclick="advanceToNextRace()"
+                                    class="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5">
+                                    <span>次のレース（第2R）へ進む ➔</span>
+                                </button>
+                                <div
+                                    class="p-2 bg-slate-950 border border-slate-800 rounded-lg text-[10px] text-slate-400">
+                                    幹事コンソールからも「次のレース」へ進行できます
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 全レース終了後のグランドフィナーレ（総合表彰台）モーダル -->
+                    <div id="grand-finale-overlay"
+                        class="hidden absolute inset-0 z-50 bg-slate-950/95 backdrop-blur-lg flex flex-col items-center justify-center p-5 text-center">
+                        <div
+                            class="w-full max-w-md bg-gradient-to-b from-slate-900 via-slate-950 to-slate-900 border-2 border-amber-400/80 rounded-3xl p-6 shadow-[0_0_50px_rgba(245,158,11,0.25)] space-y-4">
+                            <div class="text-4xl animate-bounce">🏆</div>
+                            <div>
+                                <span
+                                    class="text-amber-400 text-xs font-black tracking-widest font-num block mb-1">GRAND
+                                    FINALE</span>
+                                <h2 class="text-xl sm:text-2xl font-black text-white">ウェディング・サンレンタン 総合表彰</h2>
+                                <p class="text-xs text-slate-400 mt-1">全レース終了！栄光のサンレンタン王者は！？</p>
+                            </div>
+
+                            <!-- 総合ランキングTOP3表彰台 -->
+                            <div id="grand-podium-list" class="space-y-2 text-left">
+                                <!-- JSで展開 -->
+                            </div>
+
+                            <div class="pt-2">
+                                <button onclick="closeGrandFinale()"
+                                    class="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl border border-slate-700 transition-all">
+                                    閉じる（結果画面を維持）
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- モニター下部：実況字幕帯 -->
+                    <div class="absolute bottom-3 inset-x-3 z-20 pointer-events-none flex justify-center">
+                        <div
+                            class="w-full max-w-2xl bg-slate-950/90 backdrop-blur-md border border-slate-800 px-4 py-2 rounded-xl shadow-lg flex items-center justify-between text-slate-100 text-xs">
+                            <div class="flex items-center gap-2.5 w-full">
+                                <span
+                                    class="bg-slate-800 border border-slate-700 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded shrink-0">
+                                    実況
+                                </span>
+                                <span id="commentary-banner" class="text-slate-200 tracking-wide truncate font-medium">
+                                    第4コーナーを回って各馬一斉に最後の直線コースへ入る！
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+
+            <!-- ③ 幹事用マスターコンソール -->
+            <div id="panel-admin" class="lg:col-span-3 flex flex-col w-full">
+                <div class="flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
+                    <span class="flex items-center gap-1.5 text-slate-200">
+                        🛠️ ③ 幹事コンソール
+                    </span>
+                    <span class="text-[11px] text-slate-500 font-num">ADMIN</span>
+                </div>
+
+                <div
+                    class="w-full h-[670px] bg-slate-900 rounded-2xl shadow-xl border border-slate-800 overflow-y-auto p-4">
+                    <div id="admin-content" class="space-y-4">
+                        <!-- JSで幹事操作UIを描画 -->
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <script>
+        class DerbySoundSynthesizer {
+            constructor() {
+                this.ctx = null;
+                this.muted = false;
+            }
+            init() {
+                if (!this.ctx) {
+                    const AudioContext = window.AudioContext || window.webkitAudioContext;
+                    if (AudioContext) this.ctx = new AudioContext();
+                }
+                if (this.ctx && this.ctx.state === 'suspended') {
+                    this.ctx.resume();
+                }
+            }
+            playFanfare() {
+                if (this.muted) return;
+                this.init();
+                if (!this.ctx) return;
+                const notes = [
+                    { f: 523.25, d: 0.14, t: 0 },
+                    { f: 523.25, d: 0.14, t: 0.15 },
+                    { f: 523.25, d: 0.14, t: 0.3 },
+                    { f: 659.25, d: 0.35, t: 0.45 },
+                    { f: 783.99, d: 0.35, t: 0.8 },
+                    { f: 659.25, d: 0.2, t: 1.15 },
+                    { f: 783.99, d: 0.6, t: 1.35 },
+                    { f: 1046.50, d: 0.8, t: 1.95 }
+                ];
+                notes.forEach(n => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(n.f, this.ctx.currentTime + n.t);
+                    gain.gain.setValueAtTime(0.001, this.ctx.currentTime + n.t);
+                    gain.gain.exponentialRampToValueAtTime(0.25, this.ctx.currentTime + n.t + 0.03);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + n.t + n.d);
+                    osc.connect(gain);
+                    gain.connect(this.ctx.destination);
+                    osc.start(this.ctx.currentTime + n.t);
+                    osc.stop(this.ctx.currentTime + n.t + n.d);
+                });
+            }
+            playCheers() {
+                if (this.muted || !this.ctx) return;
+                this.init();
+                const bufferSize = this.ctx.sampleRate * 2.2;
+                const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+                const output = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) {
+                    output[i] = Math.random() * 2 - 1;
+                }
+                const whiteNoise = this.ctx.createBufferSource();
+                whiteNoise.buffer = buffer;
+                const filter = this.ctx.createBiquadFilter();
+                filter.type = 'bandpass';
+                filter.frequency.value = 850;
+                filter.Q.value = 1.0;
+                const gain = this.ctx.createGain();
+                gain.gain.setValueAtTime(0.01, this.ctx.currentTime);
+                gain.gain.linearRampToValueAtTime(0.14, this.ctx.currentTime + 0.5);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 2.2);
+                whiteNoise.connect(filter);
+                filter.connect(gain);
+                gain.connect(this.ctx.destination);
+                whiteNoise.start();
+            }
+            playGallop() {
+                if (this.muted || !this.ctx) return;
+                this.init();
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(140, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(40, this.ctx.currentTime + 0.08);
+                gain.gain.setValueAtTime(0.08, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.08);
+                osc.connect(gain);
+                gain.connect(this.ctx.destination);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.08);
+            }
+        }
+        const sound = new DerbySoundSynthesizer();
+
+        function toggleSound() {
+            sound.muted = !sound.muted;
+            const icon = document.getElementById("sound-icon");
+            const text = document.getElementById("sound-text");
+            if (icon && text) {
+                icon.innerText = sound.muted ? "🔇" : "🔊";
+                text.innerText = sound.muted ? "MUTED" : "SOUND ON";
+            }
+        }
+
+        const DEFAULT_RACES = [
+            {
+                id: "race_1",
+                name: "第1R：新婦の手料理杯",
+                question: "新郎が一生涯食べ続けたい「新婦の手料理No.1」は？",
+                options: [
+                    "特製ハンバーグ",
+                    "特製オムライス",
+                    "特製肉じゃが",
+                    "カレーライス",
+                    "絶品唐揚げ",
+                    "特製お味噌汁",
+                    "特製デザート",
+                    "まだ作ってもらってない"
+                ],
+                correctOrder: [6, 4, 0] // G, E, A
+            },
+            {
+                id: "race_2",
+                name: "第2R：新郎の直してほしいところ特別",
+                question: "新婦が告白！「新郎のここだけは直してほしいところ」は？",
+                options: [
+                    "夜中の大爆音いびき",
+                    "休日に昼過ぎまで爆睡",
+                    "脱いだ靴下丸めて放置",
+                    "ゲーム中に返事しない",
+                    "急な筋肉自慢アピール",
+                    "記念日や約束を忘れがち",
+                    "優しすぎて優柔不断",
+                    "非の打ち所なし（神）"
+                ],
+                correctOrder: [0, 2, 4] // A, C, E
+            },
+            {
+                id: "race_3",
+                name: "第3R：二人の思い出ステークス（最終戦）",
+                question: "新郎新婦が選ぶ「一番思い出に残っているデートスポット」は？",
+                options: [
+                    "初デートの水族館",
+                    "雨の東京ディズニーランド",
+                    "二人で行った沖縄旅行",
+                    "近所のいつもの居酒屋",
+                    "夜景を見に行った展望台",
+                    "ドライブで行った富士山",
+                    "おうち映画鑑賞会",
+                    "プロポーズした高級ホテル"
+                ],
+                correctOrder: [2, 7, 0] // C, H, A
+            }
+        ];
+
+        const HORSES_DATA = [
+            { num: 1, letter: "A", name: "サイバーヒー", title: "特製ハンバーグ", odds: "14.2", color: "#e2e8f0", jockeyColor: "#cbd5e1", style: "追込" },
+            { num: 2, letter: "B", name: "コニーティーチャン", title: "特製オムライス", odds: "5.8", color: "#334155", jockeyColor: "#1e293b", style: "逃げ" },
+            { num: 3, letter: "C", name: "スッポンスポロクス", title: "特製肉じゃが", odds: "8.4", color: "#dc2626", jockeyColor: "#b91c1c", style: "先行" },
+            { num: 4, letter: "D", name: "ジェッドムリサイズ", title: "カレーライス", odds: "19.3", color: "#2563eb", jockeyColor: "#1d4ed8", style: "先行" },
+            { num: 5, letter: "E", name: "マッスル唐揚げ（屈強男）", title: "絶品唐揚げ", odds: "4.1", color: "#d97706", jockeyColor: "#b45309", style: "差し" },
+            { num: 6, letter: "F", name: "アキネイヅミツデス", title: "特製お味噌汁", odds: "45.0", color: "#059669", jockeyColor: "#047857", style: "追込" },
+            { num: 7, letter: "G", name: "シューマッスルズシ", title: "特製デザート", odds: "2.3", color: "#ea580c", jockeyColor: "#c2410c", style: "豪脚マクリ" },
+            { num: 8, letter: "H", name: "ヒメオマンパルスタ", title: "まだ作ってもらってない", odds: "7.6", color: "#be185d", jockeyColor: "#9d174d", style: "差し" }
+        ];
+
+        function loadSavedRaces() {
+            try {
+                const saved = localStorage.getItem("wedding_derby_races_v2");
+                if (saved) {
+                    const parsed = JSON.parse(saved);
+                    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+                }
+            } catch (e) {
+                console.warn("Storage load error:", e);
+            }
+            return DEFAULT_RACES;
+        }
+
+        const AppState = {
+            status: "idle", // 'idle' | 'racing' | 'result' | 'grand_finale'
+            adminTab: "live",
+            races: loadSavedRaces(),
+            currentRaceIndex: 0,
+            question: "",
+            correctOrder: [6, 4, 0],
+            supabaseUrl: localStorage.getItem("wedding_supabase_url") || "",
+            supabaseKey: localStorage.getItem("wedding_supabase_key") || "",
+            supabaseClient: null,
+            channel: null,
+            isCloudConnected: false,
+            currentUser: {
+                id: "guest_" + (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10)),
+                name: "ゲスト（あなた）",
+                score: 0,
+                betSlip: null
+            },
+            mockGuests: [
+                { id: "g1", name: "新郎友人・たけし", score: 0, betSlip: null },
+                { id: "g2", name: "新婦同僚・えりか", score: 0, betSlip: null },
+                { id: "g3", name: "大学サークル・けんた", score: 0, betSlip: null },
+                { id: "g4", name: "受付・まい", score: 0, betSlip: null },
+                { id: "g5", name: "新婦親友・さくら", score: 0, betSlip: null }
+            ],
+            cloudGuests: [],
+            cameraMode: "follow"
+        };
+
+        function initSupabaseIfConfigured() {
+            if (!window.supabase || !AppState.supabaseUrl || !AppState.supabaseKey) {
+                updateCloudStatusBadge(false);
+                return;
+            }
+
+            try {
+                AppState.supabaseClient = window.supabase.createClient(AppState.supabaseUrl, AppState.supabaseKey);
+
+                // リアルタイムチャンネルの購読
+                AppState.channel = AppState.supabaseClient.channel('wedding-derby-sync')
+                    .on('broadcast', { event: 'game-state' }, ({ payload }) => {
+                        handleRemoteGameState(payload);
+                    })
+                    .on('broadcast', { event: 'guest-bet' }, ({ payload }) => {
+                        handleRemoteGuestBet(payload);
+                    })
+                    .subscribe((status) => {
+                        if (status === 'SUBSCRIBED') {
+                            AppState.isCloudConnected = true;
+                            updateCloudStatusBadge(true);
+                        } else {
+                            updateCloudStatusBadge(false);
+                        }
+                    });
+            } catch (err) {
+                console.warn("Supabase init error:", err);
+                updateCloudStatusBadge(false);
+            }
+        }
+
+        function updateCloudStatusBadge(connected) {
+            const dot = document.getElementById("cloud-dot");
+            const label = document.getElementById("cloud-label");
+            if (!dot || !label) return;
+            if (connected) {
+                dot.className = "w-1.5 h-1.5 rounded-full bg-emerald-400";
+                label.innerText = "Supabase 接続中";
+            } else {
+                dot.className = "w-1.5 h-1.5 rounded-full bg-slate-500";
+                label.innerText = "ローカル模擬モード";
+            }
+        }
+
+        // 他端末からのゲーム状態受信
+        function handleRemoteGameState(payload) {
+            if (!payload) return;
+            AppState.status = payload.status;
+            AppState.currentRaceIndex = payload.currentRaceIndex;
+            AppState.correctOrder = [...payload.correctOrder];
+            applyCurrentRaceToHorses();
+
+            if (payload.status === "racing") {
+                if (AppState.status !== "racing") {
+                    startDerbyRace(true); // リモート経由で発走
+                }
+            } else if (payload.status === "idle") {
+                resetHorsePositions();
+                updateStatusBadge();
+            } else if (payload.status === "result") {
+                renderPodiumModal();
+            } else if (payload.status === "grand_finale") {
+                openGrandFinale();
+            }
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        // 他のゲストの投票受信
+        function handleRemoteGuestBet(payload) {
+            if (!payload || !payload.userId) return;
+            const existing = AppState.cloudGuests.find(g => g.id === payload.userId);
+            if (existing) {
+                existing.betSlip = payload.betSlip;
+                existing.name = payload.name || existing.name;
+            } else {
+                AppState.cloudGuests.push({
+                    id: payload.userId,
+                    name: payload.name || "ゲスト",
+                    score: 0,
+                    betSlip: payload.betSlip
+                });
+            }
+            renderAdminScreen();
+        }
+
+        // 幹事のアクションを全員へ配信
+        function broadcastGameState() {
+            if (!AppState.channel || !AppState.isCloudConnected) return;
+            AppState.channel.send({
+                type: 'broadcast',
+                event: 'game-state',
+                payload: {
+                    status: AppState.status,
+                    currentRaceIndex: AppState.currentRaceIndex,
+                    correctOrder: AppState.correctOrder
+                }
+            });
+        }
+
+        // ゲストの投票を幹事＆モニターへ配信
+        function broadcastUserBet(bet) {
+            if (!AppState.channel || !AppState.isCloudConnected) return;
+            AppState.channel.send({
+                type: 'broadcast',
+                event: 'guest-bet',
+                payload: {
+                    userId: AppState.currentUser.id,
+                    name: AppState.currentUser.name,
+                    betSlip: bet
+                }
+            });
+        }
+
+        function applyCurrentRaceToHorses() {
+            const race = AppState.races[AppState.currentRaceIndex] || AppState.races[0];
+            if (!race) return;
+            AppState.question = race.question;
+            if (race.correctOrder && race.correctOrder.length === 3) {
+                AppState.correctOrder = [...race.correctOrder];
+            }
+            const titleEl = document.getElementById("odds-race-title");
+            if (titleEl) titleEl.innerText = race.name || `第${AppState.currentRaceIndex + 1}R`;
+            const guideRaceEl = document.getElementById("guide-current-race");
+            if (guideRaceEl) guideRaceEl.innerText = race.name || `第${AppState.currentRaceIndex + 1}R`;
+            const roundBadge = document.getElementById("current-round-badge");
+            if (roundBadge) roundBadge.innerText = `第${AppState.currentRaceIndex + 1}R / 全${AppState.races.length}R`;
+            const modalRoundTag = document.getElementById("modal-round-tag");
+            if (modalRoundTag) modalRoundTag.innerText = `第${AppState.currentRaceIndex + 1}R 着順確定`;
+
+            HORSES_DATA.forEach((h, i) => {
+                h.title = (race.options && race.options[i]) ? race.options[i] : `選択肢${h.letter}`;
+            });
+        }
+
+        function simulateMockGuestBets() {
+            if (!AppState.mockGuests) return;
+            AppState.mockGuests.forEach((guest) => {
+                const available = [0, 1, 2, 3, 4, 5, 6, 7];
+                const bet = [];
+                for (let i = 0; i < 3; i++) {
+                    const r = Math.floor(Math.random() * available.length);
+                    bet.push(available.splice(r, 1)[0]);
+                }
+                guest.betSlip = bet;
+            });
+        }
+
+        applyCurrentRaceToHorses();
+        simulateMockGuestBets();
+    </script>
+
+    <script>
+        let scene, camera, renderer;
+        let horseMeshes = [];
+        let clock = new THREE.Clock();
+
+        const trackWidth = 32;
+        const trackLength = 1200;
+        const startZ = 20;
+        const finishZ = -400;
+
+        function createSaddleCanvasTexture(letter, bgColor, textColor = "#ffffff") {
+            const cv = document.createElement("canvas");
+            cv.width = 128;
+            cv.height = 128;
+            const ctx = cv.getContext("2d");
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(0, 0, 128, 128);
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 10;
+            ctx.strokeRect(4, 4, 120, 120);
+            ctx.fillStyle = textColor;
+            ctx.font = "bold 84px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(letter, 64, 66);
+            return new THREE.CanvasTexture(cv);
+        }
+
+        function createBadgeSprite(letter, bgColor) {
+            const cv = document.createElement("canvas");
+            cv.width = 64;
+            cv.height = 64;
+            const ctx = cv.getContext("2d");
+            ctx.fillStyle = bgColor;
+            ctx.beginPath();
+            ctx.arc(32, 32, 28, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 4;
+            ctx.stroke();
+            ctx.fillStyle = "#ffffff";
+            ctx.font = "900 36px monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(letter, 32, 34);
+
+            const tex = new THREE.CanvasTexture(cv);
+            const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
+            const sprite = new THREE.Sprite(mat);
+            sprite.scale.set(1.5, 1.5, 1);
+            return sprite;
+        }
+
+        function generateTurfTexture() {
+            const cv = document.createElement("canvas");
+            cv.width = 128;
+            cv.height = 128;
+            const ctx = cv.getContext("2d");
+            ctx.fillStyle = "#2d7a38";
+            ctx.fillRect(0, 0, 128, 128);
+            for (let i = 0; i < 400; i++) {
+                ctx.fillStyle = Math.random() > 0.5 ? "#24662d" : "#3aa049";
+                ctx.fillRect(Math.random() * 128, Math.random() * 128, 2, 2);
+            }
+            const tex = new THREE.CanvasTexture(cv);
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.RepeatWrapping;
+            tex.repeat.set(40, 160);
+            return tex;
+        }
+
+        function generateWallTexture() {
+            const cv = document.createElement("canvas");
+            cv.width = 128;
+            cv.height = 128;
+            const ctx = cv.getContext("2d");
+            ctx.fillStyle = "#c27c62";
+            ctx.fillRect(0, 0, 128, 128);
+            for (let y = 0; y < 128; y += 16) {
+                ctx.fillStyle = "#8a513e";
+                ctx.fillRect(0, y, 128, 2);
+                for (let x = (y % 32 === 0 ? 0 : 16); x < 128; x += 32) {
+                    ctx.fillRect(x, y, 2, 16);
+                }
+            }
+            const tex = new THREE.CanvasTexture(cv);
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.RepeatWrapping;
+            tex.repeat.set(2, 60);
+            return tex;
+        }
+
+        function createFence(xPos) {
+            const fenceGroup = new THREE.Group();
+            const postGeo = new THREE.CylinderGeometry(0.12, 0.12, 1.4, 6);
+            const postMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const railGeo = new THREE.BoxGeometry(0.15, 0.25, trackLength);
+            const railMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+
+            const topRail = new THREE.Mesh(railGeo, railMat);
+            topRail.position.set(xPos, 1.1, -trackLength / 2 + 100);
+            topRail.castShadow = true;
+            fenceGroup.add(topRail);
+
+            const postCount = Math.floor(trackLength / 6);
+            for (let i = 0; i <= postCount; i++) {
+                const post = new THREE.Mesh(postGeo, postMat);
+                const z = 100 - i * 6;
+                post.position.set(xPos, 0.7, z);
+                post.castShadow = true;
+                fenceGroup.add(post);
+            }
+            return fenceGroup;
+        }
+
+        function buildLowPolyHorse(horseData) {
+            const group = new THREE.Group();
+
+            const horseMat = new THREE.MeshLambertMaterial({ color: 0x854d24, flatShading: true });
+            const darkMat = new THREE.MeshLambertMaterial({ color: 0x3a1f10, flatShading: true });
+            const whiteMat = new THREE.MeshLambertMaterial({ color: 0xf8fafc, flatShading: true });
+            const jockeyMat = new THREE.MeshLambertMaterial({ color: horseData.jockeyColor, flatShading: true });
+            const saddleMat = new THREE.MeshLambertMaterial({
+                map: createSaddleCanvasTexture(horseData.letter, horseData.color, horseData.num === 1 ? "#000000" : "#ffffff"),
+                flatShading: true
+            });
+
+            // 胴体
+            const bodyGeo = new THREE.BoxGeometry(1.4, 1.5, 3.2);
+            const body = new THREE.Mesh(bodyGeo, horseMat);
+            body.position.y = 2.4;
+            body.castShadow = true;
+            group.add(body);
+
+            // 首と頭
+            const neckGeo = new THREE.BoxGeometry(0.9, 1.8, 1.2);
+            const neck = new THREE.Mesh(neckGeo, horseMat);
+            neck.position.set(0, 3.5, -1.5);
+            neck.rotation.x = Math.PI / 4;
+            neck.castShadow = true;
+            group.add(neck);
+
+            const headGeo = new THREE.BoxGeometry(0.8, 1.0, 1.6);
+            const head = new THREE.Mesh(headGeo, horseMat);
+            head.position.set(0, 4.2, -2.4);
+            head.rotation.x = -Math.PI / 8;
+            head.castShadow = true;
+            group.add(head);
+
+            // 鞍（ゼッケン）
+            const saddleGeo = new THREE.BoxGeometry(1.48, 0.35, 1.8);
+            const saddle = new THREE.Mesh(saddleGeo, saddleMat);
+            saddle.position.set(0, 3.2, -0.1);
+            group.add(saddle);
+
+            // ジョッキー
+            const legsGeo = new THREE.BoxGeometry(1.1, 0.7, 1.2);
+            const jockeyLegs = new THREE.Mesh(legsGeo, whiteMat);
+            jockeyLegs.position.set(0, 3.4, -0.1);
+            group.add(jockeyLegs);
+
+            const torsoGeo = new THREE.BoxGeometry(0.9, 1.1, 1.2);
+            const torso = new THREE.Mesh(torsoGeo, jockeyMat);
+            torso.position.set(0, 4.0, -0.6);
+            torso.rotation.x = Math.PI / 3.5;
+            torso.castShadow = true;
+            group.add(torso);
+
+            // 背中のゼッケンプレート
+            const backBadgeGeo = new THREE.PlaneGeometry(0.7, 0.7);
+            const backBadgeMat = new THREE.MeshBasicMaterial({
+                map: createSaddleCanvasTexture(horseData.letter, "#000000", "#ffffff"),
+                side: THREE.DoubleSide
+            });
+            const backBadge = new THREE.Mesh(backBadgeGeo, backBadgeMat);
+            backBadge.position.set(0, 4.3, 0.05);
+            backBadge.rotation.x = Math.PI / 3.5;
+            group.add(backBadge);
+
+            // ヘルメット
+            const helmetGeo = new THREE.SphereGeometry(0.48, 7, 6);
+            const helmet = new THREE.Mesh(helmetGeo, jockeyMat);
+            helmet.position.set(0, 4.8, -1.2);
+            helmet.castShadow = true;
+            group.add(helmet);
+
+            // 頭上マーカー
+            const headBadge = createBadgeSprite(horseData.letter, horseData.color);
+            headBadge.position.set(0, 6.2, -1.2);
+            group.add(headBadge);
+
+            // 脚
+            const legGeo = new THREE.BoxGeometry(0.35, 2.0, 0.4);
+            const hoofGeo = new THREE.BoxGeometry(0.38, 0.3, 0.45);
+
+            function createLeg(x, z) {
+                const legPivot = new THREE.Group();
+                legPivot.position.set(x, 2.0, z);
+                const upperLeg = new THREE.Mesh(legGeo, horseMat);
+                upperLeg.position.y = -0.8;
+                upperLeg.castShadow = true;
+                legPivot.add(upperLeg);
+                const hoof = new THREE.Mesh(hoofGeo, darkMat);
+                hoof.position.y = -1.75;
+                legPivot.add(hoof);
+                return legPivot;
+            }
+
+            const legFL = createLeg(-0.5, -1.1);
+            const legFR = createLeg(0.5, -1.1);
+            const legBL = createLeg(-0.5, 1.1);
+            const legBR = createLeg(0.5, 1.1);
+            group.add(legFL);
+            group.add(legFR);
+            group.add(legBL);
+            group.add(legBR);
+
+            // 尻尾
+            const tailGeo = new THREE.BoxGeometry(0.25, 1.6, 0.3);
+            const tail = new THREE.Mesh(tailGeo, darkMat);
+            tail.position.set(0, 2.2, 1.8);
+            tail.rotation.x = -Math.PI / 4;
+            group.add(tail);
+
+            return {
+                mesh: group,
+                data: horseData,
+                legs: { legFL, legFR, legBL, legBR, tail, head },
+                currentSpeed: 1.0,
+                baseLaneX: 0,
+                currentLaneX: 0,
+                targetLaneX: 0,
+                progressZ: 0,
+                finished: false
+            };
+        }
+
+        function initThreeScene() {
+            const container = document.getElementById("canvas-box");
+            if (!container) return;
+
+            container.innerHTML = "";
+
+            const width = container.clientWidth || 500;
+            const height = container.clientHeight || 670;
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x9bd2fc);
+            scene.fog = new THREE.FogExp2(0x9bd2fc, 0.0022);
+
+            camera = new THREE.PerspectiveCamera(50, width / height, 0.5, 1500);
+            camera.position.set(0, 8, 25);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(width, height);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x446644, 0.8);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xfffaed, 0.95);
+            dirLight.position.set(40, 70, 40);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 1024;
+            dirLight.shadow.mapSize.height = 1024;
+            scene.add(dirLight);
+
+            // コース芝生グラウンド
+            const groundGeo = new THREE.PlaneGeometry(trackWidth, trackLength);
+            const groundMat = new THREE.MeshLambertMaterial({ map: generateTurfTexture() });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.set(0, 0, -trackLength / 2 + 100);
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // 両脇の白い柵（ラチ）
+            scene.add(createFence(-trackWidth / 2));
+            scene.add(createFence(trackWidth / 2));
+
+            // 観客スタンド壁（コース左側のラチ真横にぴったり配置）
+            const standWallGeo = new THREE.BoxGeometry(10, 12, trackLength);
+            const standWallMat = new THREE.MeshLambertMaterial({ map: generateWallTexture() });
+            const standWall = new THREE.Mesh(standWallGeo, standWallMat);
+            standWall.position.set(-trackWidth / 2 - 6, 6, -trackLength / 2 + 100);
+            standWall.receiveShadow = true;
+            scene.add(standWall);
+
+            // スタンド上部のガラス窓
+            const glassGeo = new THREE.BoxGeometry(2, 6, trackLength);
+            const glassMat = new THREE.MeshLambertMaterial({ color: 0x8fd6ea, transparent: true, opacity: 0.65 });
+            const glass = new THREE.Mesh(glassGeo, glassMat);
+            glass.position.set(-trackWidth / 2 - 3, 14, -trackLength / 2 + 100);
+            scene.add(glass);
+
+            // ゴール板・ゴールポール（左ラチ際 Z = -400 地点）
+            const finishPoleGeo = new THREE.CylinderGeometry(0.3, 0.3, 16, 12);
+            const finishPoleMat = new THREE.MeshLambertMaterial({ color: 0xef4444 });
+            const finishPole = new THREE.Mesh(finishPoleGeo, finishPoleMat);
+            finishPole.position.set(-trackWidth / 2 - 1, 8, finishZ);
+            scene.add(finishPole);
+
+            // ゴールミラー表示板
+            const finishSignGeo = new THREE.BoxGeometry(4, 2, 0.4);
+            const finishSignMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const finishSign = new THREE.Mesh(finishSignGeo, finishSignMat);
+            finishSign.position.set(-trackWidth / 2 - 1, 14, finishZ);
+            scene.add(finishSign);
+
+            // 8頭配置
+            horseMeshes = [];
+            HORSES_DATA.forEach((hData, i) => {
+                const hObj = buildLowPolyHorse(hData);
+                const laneX = -9 + (i * 2.5);
+                hObj.baseLaneX = laneX;
+                hObj.currentLaneX = laneX;
+                hObj.targetLaneX = laneX;
+                hObj.progressZ = startZ - (i * 0.8);
+                hObj.mesh.position.set(laneX, 0, hObj.progressZ);
+                scene.add(hObj.mesh);
+                horseMeshes.push(hObj);
+            });
+
+            window.addEventListener("resize", onWindowResize);
+        }
+
+        function onWindowResize() {
+            const container = document.getElementById("canvas-box");
+            if (!renderer || !container || !camera) return;
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+            if (width === 0 || height === 0) return;
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            renderer.setSize(width, height);
+        }
+    </script>
+
+    <script>
+        let gallopTimer = 0;
+        let raceElapsedTime = 0;
+
+        function resetHorsePositions() {
+            raceElapsedTime = 0;
+            horseMeshes.forEach((h, i) => {
+                h.progressZ = startZ - (i * 0.8);
+                h.currentSpeed = 1.0;
+                h.currentLaneX = h.baseLaneX;
+                h.targetLaneX = h.baseLaneX;
+                h.finished = false;
+                h.mesh.position.set(h.baseLaneX, 0, h.progressZ);
+                h.mesh.rotation.set(0, 0, 0);
+            });
+            const distEl = document.getElementById("remain-dist-display");
+            if (distEl) distEl.innerText = "400";
+            const commEl = document.getElementById("commentary-banner");
+            if (commEl) commEl.innerText = "第4コーナーを回って各馬一斉に最後の直線コースへ入る！";
+            const overlay = document.getElementById("result-overlay");
+            if (overlay) overlay.classList.add("hidden");
+        }
+
+        function animateDerby() {
+            requestAnimationFrame(animateDerby);
+
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            if (!horseMeshes || horseMeshes.length === 0) return;
+
+            let leadHorse = horseMeshes[0];
+            const [winnerIdx, secondIdx, thirdIdx] = AppState.correctOrder;
+
+            if (AppState.status === "racing") {
+                raceElapsedTime += delta;
+            }
+
+            horseMeshes.forEach((h, idx) => {
+                const isRacing = AppState.status === "racing";
+                const remain = h.progressZ - finishZ;
+
+                if (isRacing && !h.finished) {
+                    // 残り距離に応じた飛び出し＆大外抜き去りレース展開
+                    if (remain > 260) {
+                        // 【序盤】2番[B]が果敢に飛び出し、1着馬は後方で脚を溜める
+                        if (idx === 1) {
+                            h.currentSpeed = 1.25;
+                        } else if (idx === secondIdx || idx === thirdIdx) {
+                            h.currentSpeed = 1.10;
+                        } else if (idx === winnerIdx) {
+                            h.currentSpeed = 0.95;
+                        } else {
+                            h.currentSpeed = 1.0 + (Math.sin(idx + time) * 0.05);
+                        }
+                    } else if (remain > 160) {
+                        // 【中盤】逃げ馬がタレてきて、1着馬が大外へスライド開始
+                        if (idx === 1) {
+                            h.currentSpeed = 0.98;
+                        } else if (idx === winnerIdx) {
+                            h.targetLaneX = 7.5; // 大外へ持ち出す！
+                            h.currentSpeed = 1.25;
+                        } else if (idx === secondIdx) {
+                            h.currentSpeed = 1.12;
+                        } else {
+                            h.currentSpeed = 1.02;
+                        }
+                    } else {
+                        // 【残り160m・直線ラストスパート】幹事指定の1着馬が大外から全頭ごぼう抜き！
+                        if (idx === winnerIdx) {
+                            h.targetLaneX = 6.8;
+                            h.currentSpeed = 1.55;
+                        } else if (idx === secondIdx) {
+                            h.targetLaneX = -2.0;
+                            h.currentSpeed = 1.28;
+                        } else if (idx === thirdIdx) {
+                            h.targetLaneX = 1.0;
+                            h.currentSpeed = 1.20;
+                        } else if (idx === 1) {
+                            h.currentSpeed = 0.85;
+                        } else {
+                            h.currentSpeed = 0.98;
+                        }
+                    }
+
+                    // レーン移動（X軸方向のスムーズな車線変更）
+                    h.currentLaneX += (h.targetLaneX - h.currentLaneX) * (delta * 3.5);
+                    h.mesh.position.x = h.currentLaneX;
+
+                    // 前進
+                    h.progressZ -= h.currentSpeed * 34 * delta;
+                    h.mesh.position.z = h.progressZ;
+
+                    // 走るバウンス
+                    h.mesh.position.y = Math.abs(Math.sin(time * 18 * h.currentSpeed)) * 0.28;
+
+                    // ゴール判定
+                    if (h.progressZ <= finishZ) {
+                        h.finished = true;
+                    }
+                }
+
+                // 脚のピッチ
+                const legSpeed = isRacing ? 17 * h.currentSpeed : 6;
+                const swing = Math.sin(time * legSpeed + idx);
+                h.legs.legFL.rotation.x = swing * 0.75;
+                h.legs.legBR.rotation.x = swing * 0.75;
+                h.legs.legFR.rotation.x = -swing * 0.75;
+                h.legs.legBL.rotation.x = -swing * 0.75;
+                h.legs.head.rotation.x = -Math.PI / 8 + Math.cos(time * legSpeed * 2) * 0.1;
+                h.legs.tail.rotation.z = Math.sin(time * legSpeed) * 0.25;
+
+                // 先頭馬の判定
+                if (h.progressZ < leadHorse.progressZ) {
+                    leadHorse = h;
+                }
+            });
+
+            // レース中の実況・残り距離
+            if (AppState.status === "racing") {
+                gallopTimer += delta;
+                if (gallopTimer > 0.18) {
+                    sound.playGallop();
+                    gallopTimer = 0;
+                }
+
+                const remainDist = Math.max(0, Math.floor(leadHorse.progressZ - finishZ));
+                const distEl = document.getElementById("remain-dist-display");
+                if (distEl) distEl.innerText = remainDist;
+
+                const commEl = document.getElementById("commentary-banner");
+                const winner = HORSES_DATA[winnerIdx];
+                const second = HORSES_DATA[secondIdx];
+
+                if (commEl) {
+                    if (remainDist > 270) {
+                        commEl.innerText = `序盤リードを奪ったのは [${leadHorse.data.letter}] ${leadHorse.data.title}！快調に飛ばしていく！`;
+                    } else if (remainDist > 160) {
+                        commEl.innerText = `残り200m標識！後続集団が一気に差を詰めてきた！馬群が密集する！！`;
+                    } else if (remainDist > 60) {
+                        commEl.innerText = `大外から凄まじい手応え！[${winner.letter}] ${winner.title} が一気にごぼう抜き！外から飛び出してきたーっ！！`;
+                    } else if (remainDist > 10) {
+                        commEl.innerText = `[${winner.letter}] が完全に抜け出した！内から [${second.letter}] が食い下がるが届くか！？先頭は [${winner.letter}] だ！！`;
+                    } else {
+                        commEl.innerText = `[${winner.letter}] ${winner.title} 堂々の先頭ゴールイン！！大外一気の見事な差し切り勝ち！！`;
+
+                        const allFinished = horseMeshes.every(h => h.finished);
+                        if (allFinished && AppState.status === "racing") {
+                            onRaceComplete();
+                        }
+                    }
+                }
+            }
+
+            // カメラワーク
+            const targetPos = (leadHorse && leadHorse.mesh) ? leadHorse.mesh.position : new THREE.Vector3();
+
+            if (AppState.cameraMode === "follow") {
+                camera.position.lerp(new THREE.Vector3(targetPos.x + 10, targetPos.y + 7.5, targetPos.z + 24), 0.08);
+                camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z - 10);
+            } else if (AppState.cameraMode === "side") {
+                camera.position.lerp(new THREE.Vector3(targetPos.x + 24, targetPos.y + 4.5, targetPos.z - 2), 0.08);
+                camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
+            } else if (AppState.cameraMode === "front") {
+                camera.position.lerp(new THREE.Vector3(targetPos.x, targetPos.y + 3.5, targetPos.z - 24), 0.08);
+                camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
+            } else if (AppState.cameraMode === "top") {
+                camera.position.lerp(new THREE.Vector3(-trackWidth / 2 - 8, 28, targetPos.z + 12), 0.08);
+                camera.lookAt(0, 0, targetPos.z - 15);
+            }
+
+            if (renderer && scene) renderer.render(scene, camera);
+        }
+
+        function setCam(mode) {
+            AppState.cameraMode = mode;
+            const btns = {
+                follow: document.getElementById("btn-cam-follow"),
+                side: document.getElementById("btn-cam-side"),
+                front: document.getElementById("btn-cam-front"),
+                top: document.getElementById("btn-cam-top")
+            };
+            Object.keys(btns).forEach(k => {
+                if (!btns[k]) return;
+                if (k === mode) {
+                    btns[k].className = "px-2.5 py-1 text-[11px] font-bold rounded bg-amber-500 text-slate-950 shadow-sm";
+                } else {
+                    btns[k].className = "px-2.5 py-1 text-[11px] font-medium rounded text-slate-400 hover:text-white";
+                }
+            });
+        }
+    </script>
+
+    <script>
+        function onRaceComplete() {
+            AppState.status = "result";
+            sound.playFanfare();
+            sound.playCheers();
+            updateStatusBadge();
+            broadcastGameState();
+
+            const correct = AppState.correctOrder;
+
+            // ユーザーのポイント累計
+            if (AppState.currentUser.betSlip) {
+                const pts = calcPoints(AppState.currentUser.betSlip, correct);
+                AppState.currentUser.score += pts;
+            }
+            // モックゲストのポイント累計
+            AppState.mockGuests.forEach(g => {
+                if (g.betSlip) {
+                    const pts = calcPoints(g.betSlip, correct);
+                    g.score += pts;
+                }
+            });
+            // 接続中の実ゲストのポイント累計
+            AppState.cloudGuests.forEach(g => {
+                if (g.betSlip) {
+                    const pts = calcPoints(g.betSlip, correct);
+                    g.score += pts;
+                }
+            });
+
+            renderPodiumModal();
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        function calcPoints(bet, correct) {
+            if (!bet || bet.length < 3) return 0;
+            if (bet[0] === correct[0] && bet[1] === correct[1] && bet[2] === correct[2]) return 6;
+            const sortedB = [...bet].sort().join();
+            const sortedC = [...correct].sort().join();
+            if (sortedB === sortedC) return 4;
+            if (bet[0] === correct[0] && bet[1] === correct[1]) return 3;
+            return 0;
+        }
+
+        function renderPodiumModal() {
+            const modal = document.getElementById("result-overlay");
+            const listEl = document.getElementById("result-podium-list");
+            const nextBtn = document.getElementById("btn-modal-next-race");
+            if (!modal || !listEl) return;
+
+            listEl.innerHTML = "";
+            const medals = ["🥇 1着 (単勝・軸)", "🥈 2着 (対抗)", "🥉 3着 (単穴)"];
+
+            AppState.correctOrder.forEach((horseIdx, i) => {
+                const h = HORSES_DATA[horseIdx];
+                const row = document.createElement("div");
+                row.className = "flex items-center justify-between bg-slate-900 border border-slate-700 p-2.5 rounded-2xl text-xs";
+                row.innerHTML = `
+          <div class="flex items-center gap-2">
+            <span class="font-black text-amber-400 font-mono text-[11px]">${medals[i]}</span>
+            <span class="w-5 h-5 rounded text-[10px] font-black flex items-center justify-center font-mono shadow ${h.num === 1 ? 'text-black' : 'text-white'}" style="background-color: ${h.color}">
+              ${h.letter}
+            </span>
+            <div class="text-left">
+              <div class="font-bold text-white truncate max-w-[130px]">${h.title}</div>
+            </div>
+          </div>
+          <span class="text-amber-300 font-mono font-bold">${h.odds}倍</span>
+        `;
+                listEl.appendChild(row);
+            });
+
+            // 次のレースがあるかどうかでボタン文言を切替
+            const isLastRace = AppState.currentRaceIndex >= AppState.races.length - 1;
+            if (nextBtn) {
+                if (isLastRace) {
+                    nextBtn.innerHTML = `<span>🏆 全レース終了！総合優勝発表へ ➔</span>`;
+                    nextBtn.className = "w-full py-2.5 bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-black text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-1.5";
+                } else {
+                    const nextNum = AppState.currentRaceIndex + 2;
+                    nextBtn.innerHTML = `<span>次のレース（第${nextNum}R）へ進む ➔</span>`;
+                    nextBtn.className = "w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs rounded-xl shadow-md transition-all flex items-center justify-center gap-1.5";
+                }
+            }
+
+            modal.classList.remove("hidden");
+        }
+
+        // 次のレースへ進む（連続進行コアロジック）
+        function advanceToNextRace() {
+            const isLastRace = AppState.currentRaceIndex >= AppState.races.length - 1;
+            const modal = document.getElementById("result-overlay");
+            if (modal) modal.classList.add("hidden");
+
+            if (isLastRace) {
+                openGrandFinale();
+            } else {
+                AppState.currentRaceIndex += 1;
+                AppState.status = "idle";
+                AppState.currentUser.betSlip = null;
+                userSelections = [];
+
+                applyCurrentRaceToHorses();
+                simulateMockGuestBets();
+                resetHorsePositions();
+                updateStatusBadge();
+                broadcastGameState();
+
+                renderOddsBoard();
+                renderPhoneScreen();
+                renderAdminScreen();
+                sound.playFanfare();
+            }
+        }
+
+        function openGrandFinale() {
+            AppState.status = "grand_finale";
+            sound.playFanfare();
+            sound.playCheers();
+            updateStatusBadge();
+            broadcastGameState();
+            updateStatusBadge();
+
+            const modal = document.getElementById("grand-finale-overlay");
+            const listEl = document.getElementById("grand-podium-list");
+            if (!modal || !listEl) return;
+
+            listEl.innerHTML = "";
+            const sorted = getSortedParticipants();
+
+            sorted.slice(0, 3).forEach((u, i) => {
+                const medal = i === 0 ? "👑 CHAMPION 1位" : i === 1 ? "🥈 2位" : "🥉 3位";
+                const bg = i === 0
+                    ? "bg-gradient-to-r from-amber-500/20 via-amber-400/15 to-transparent border-amber-400"
+                    : "bg-slate-900 border-slate-700";
+
+                const row = document.createElement("div");
+                row.className = `flex items-center justify-between p-3 rounded-2xl border ${bg} shadow-md`;
+                row.innerHTML = `
+          <div class="flex items-center gap-3">
+            <span class="w-8 h-8 rounded-xl flex items-center justify-center font-black text-xs font-num ${i === 0 ? 'bg-amber-400 text-slate-950 ring-2 ring-yellow-300' : 'bg-slate-800 text-slate-200'}">
+              ${i + 1}
+            </span>
+            <div>
+              <span class="text-[10px] text-amber-300 font-bold block">${medal}</span>
+              <span class="text-sm font-bold text-white">${u.name}</span>
+            </div>
+          </div>
+          <div class="text-right">
+            <span class="font-num text-lg font-black text-amber-300">${u.score}</span>
+            <span class="text-xs text-slate-400"> pt</span>
+          </div>
+        `;
+                listEl.appendChild(row);
+            });
+
+            modal.classList.remove("hidden");
+        }
+
+        function closeGrandFinale() {
+            const modal = document.getElementById("grand-finale-overlay");
+            if (modal) modal.classList.add("hidden");
+        }
+    </script>
+
+    <script>
+        let userSelections = [];
+
+        function renderOddsBoard() {
+            const oddsEl = document.getElementById("odds-board-list");
+            if (!oddsEl) return;
+            oddsEl.innerHTML = "";
+            HORSES_DATA.forEach(h => {
+                const row = document.createElement("div");
+                row.className = "flex items-center justify-between text-[11px] font-bold px-1.5 py-0.5 rounded bg-black/40";
+                row.innerHTML = `
+          <div class="flex items-center gap-1.5 truncate">
+            <span class="w-4 h-4 rounded flex items-center justify-center text-[9px] font-black font-mono shadow ${h.num === 1 ? 'text-black' : 'text-white'}" style="background-color: ${h.color}">
+              ${h.letter}
+            </span>
+            <span class="text-white truncate max-w-[100px]">${h.title}</span>
+          </div>
+          <span class="text-amber-300 font-mono">${h.odds}</span>
+        `;
+                oddsEl.appendChild(row);
+            });
+        }
+
+        function renderPhoneScreen() {
+            const el = document.getElementById("phone-content");
+            if (!el) return;
+
+            const currentRace = AppState.races[AppState.currentRaceIndex] || AppState.races[0];
+
+            let html = `
+        <div class="p-3 bg-slate-900 border-b border-slate-800 flex items-center justify-between sticky top-0 z-30">
+          <div class="flex items-center gap-2">
+            <div class="w-7 h-7 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-xs text-amber-300">
+              🤵
+            </div>
+            <div>
+              <div class="text-xs font-bold text-slate-100">${AppState.currentUser.name}</div>
+              <div class="text-[9px] text-emerald-400 font-num flex items-center gap-1 font-semibold">
+                <span class="w-1.5 h-1.5 rounded-full bg-emerald-400"></span> ONLINE
+              </div>
+            </div>
+          </div>
+          <div class="text-right">
+            <span class="text-[9px] text-slate-400 font-bold block">累計得点</span>
+            <div class="bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold text-xs px-2.5 py-0.5 rounded-full font-num">
+              ${AppState.currentUser.score} pt
+            </div>
+          </div>
+        </div>
+        <div class="p-3 space-y-3">
+      `;
+
+            if (AppState.status === "idle") {
+                html += `
+          <div class="bg-slate-900 border border-slate-800 p-3 rounded-xl shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-[10px] font-bold text-amber-300/80 tracking-wider font-num">
+                ${currentRace.name}
+              </span>
+              <span class="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-num">
+                ROUND ${AppState.currentRaceIndex + 1}/${AppState.races.length}
+              </span>
+            </div>
+            <div class="text-xs font-bold text-slate-100 leading-snug">${AppState.question}</div>
+          </div>
+        `;
+
+                if (AppState.currentUser.betSlip) {
+                    html += `
+            <div class="bg-slate-900 border border-emerald-500/30 p-4 rounded-xl text-center space-y-3 shadow-sm">
+              <div class="w-9 h-9 bg-emerald-500/15 text-emerald-400 rounded-full flex items-center justify-center mx-auto text-base font-bold">
+                ✓
+              </div>
+              <div>
+                <div class="text-xs font-bold text-slate-100">第${AppState.currentRaceIndex + 1}R 馬券発券完了</div>
+                <div class="text-[10px] text-slate-400">会場モニターのレースにご注目ください</div>
+              </div>
+              <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1.5 text-left text-xs font-num">
+                <div class="text-[10px] text-amber-300/80 font-bold tracking-wider">YOUR BETTING SLIP:</div>
+          `;
+                    AppState.currentUser.betSlip.forEach((hIdx, i) => {
+                        const h = HORSES_DATA[hIdx];
+                        html += `
+              <div class="flex items-center justify-between p-1.5 bg-slate-900 rounded border border-slate-800/80 font-sans">
+                <div class="flex items-center gap-2">
+                  <span class="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center font-num ${i === 0 ? 'bg-amber-500 text-slate-950' : i === 1 ? 'bg-slate-300 text-slate-950' : 'bg-amber-700 text-white'}">${i + 1}</span>
+                  <span class="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center font-num shadow ${h.num === 1 ? 'text-black' : 'text-white'}" style="background-color: ${h.color}">${h.letter}</span>
+                  <span class="text-[11px] font-medium text-slate-200 truncate max-w-[140px]">${h.title}</span>
+                </div>
+              </div>
+            `;
+                    });
+                    html += `
+              </div>
+            </div>
+          `;
+                } else {
+                    html += `
+            <div class="flex items-center justify-between text-[11px] font-medium text-slate-400 px-1">
+              <span>1位・2位・3位の順に選択</span>
+              <span class="text-amber-300 font-num font-bold">${userSelections.length} / 3 選択中</span>
+            </div>
+            <div class="space-y-1.5">
+          `;
+                    HORSES_DATA.forEach((h, idx) => {
+                        const selIdx = userSelections.indexOf(idx);
+                        const isSel = selIdx !== -1;
+                        html += `
+              <button onclick="handleOptionClick(${idx})" class="w-full p-2 rounded-xl border text-left font-medium transition-all flex items-center justify-between ${isSel ? 'border-amber-400/80 bg-amber-500/10' : 'border-slate-800 bg-slate-900 text-slate-200'}">
+                <div class="flex items-center gap-2.5">
+                  <span class="w-5 h-5 rounded-md text-xs font-bold flex items-center justify-center font-num shadow ${h.num === 1 ? 'text-black' : 'text-white'}" style="background-color: ${h.color}">
+                    ${h.letter}
+                  </span>
+                  <span class="text-xs font-bold text-slate-200 truncate max-w-[170px]">${h.title}</span>
+                </div>
+                ${isSel ? `<span class="px-2 py-0.5 rounded text-[10px] font-bold ${selIdx === 0 ? 'bg-amber-500 text-slate-950' : selIdx === 1 ? 'bg-slate-300 text-slate-950' : 'bg-amber-700 text-white'}">第${selIdx + 1}位</span>` : ''}
+              </button>
+            `;
+                    });
+                    html += `
+            </div>
+            <button onclick="submitUserTicket()" ${userSelections.length !== 3 ? 'disabled' : ''} class="w-full py-2.5 rounded-xl font-bold text-xs shadow-sm flex items-center justify-center gap-1.5 transition-all ${userSelections.length === 3 ? 'bg-amber-500 text-slate-950 hover:bg-amber-400' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}">
+              <span>${userSelections.length === 3 ? 'この3連単で馬券発券' : 'あと ' + (3 - userSelections.length) + ' 頭選択'}</span>
+            </button>
+          `;
+                }
+            } else if (AppState.status === "racing") {
+                html += `
+          <div class="bg-slate-900 border border-amber-500/30 p-5 rounded-xl text-center space-y-2 shadow-sm">
+            <div class="text-2xl animate-bounce">🏇</div>
+            <div class="text-sm font-bold text-slate-100">第${AppState.currentRaceIndex + 1}R 発走中！</div>
+            <div class="text-[11px] text-amber-300/80">スクリーンの中継にご注目ください</div>
+          </div>
+        `;
+            } else if (AppState.status === "result") {
+                const bet = AppState.currentUser.betSlip;
+                const pts = calcPoints(bet, AppState.correctOrder);
+
+                let hitTitle = "不的中";
+                let hitColor = "bg-slate-800 text-slate-400 border border-slate-700";
+                if (pts === 6) {
+                    hitTitle = "🎉 サンレンタン完全的中 (+6pt)";
+                    hitColor = "bg-amber-500/20 text-amber-300 border border-amber-500/40 font-bold";
+                } else if (pts === 4) {
+                    hitTitle = "✨ サンレンプク的中 (+4pt)";
+                    hitColor = "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold";
+                } else if (pts === 3) {
+                    hitTitle = "🎯 ニレンタン的中 (+3pt)";
+                    hitColor = "bg-blue-500/20 text-blue-300 border border-blue-500/40 font-bold";
+                }
+
+                html += `
+          <div class="bg-slate-900 border border-slate-800 p-5 rounded-xl text-center space-y-3 shadow-sm">
+            <span class="text-[10px] text-slate-400 font-bold block font-num">第${AppState.currentRaceIndex + 1}R 判定結果</span>
+            <div class="inline-block px-3 py-1 rounded-full text-xs tracking-wide ${hitColor}">
+              ${hitTitle}
+            </div>
+            <div class="text-xs text-slate-300">
+              現在の総獲得ポイント: <span class="text-lg font-bold text-amber-300 font-num">${AppState.currentUser.score}</span> pt
+            </div>
+            <p class="text-[10px] text-slate-400 pt-1">
+              司会者が次のレースへ進めるまで少々お待ちください
+            </p>
+          </div>
+        `;
+            } else if (AppState.status === "grand_finale") {
+                html += `
+          <div class="bg-slate-900 border border-amber-500/40 p-5 rounded-xl text-center space-y-3 shadow-sm">
+            <div class="text-3xl">🏆</div>
+            <div class="text-sm font-bold text-amber-300">全レース終了！</div>
+            <div class="text-xs text-white">あなたの最終成績: <strong class="font-num text-amber-300 text-base">${AppState.currentUser.score} pt</strong></div>
+            <p class="text-[10px] text-slate-400">メインモニターの総合表彰式をご覧ください！</p>
+          </div>
+        `;
+            }
+
+            html += `</div>`;
+            el.innerHTML = html;
+        }
+
+        function handleOptionClick(idx) {
+            if (userSelections.includes(idx)) {
+                userSelections = userSelections.filter(i => i !== idx);
+            } else if (userSelections.length < 3) {
+                userSelections.push(idx);
+            }
+            renderPhoneScreen();
+        }
+
+        function submitUserTicket() {
+            if (userSelections.length !== 3) return;
+            AppState.currentUser.betSlip = [...userSelections];
+            sound.playCheers();
+            broadcastUserBet(AppState.currentUser.betSlip);
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+    </script>
+
+    <script>
+        function renderAdminScreen() {
+            const el = document.getElementById("admin-content");
+            if (!el) return;
+
+            const totalBets = (AppState.currentUser.betSlip ? 1 : 0) + AppState.mockGuests.filter(g => g.betSlip).length;
+            const totalGuests = 1 + AppState.mockGuests.length;
+            const currentRace = AppState.races[AppState.currentRaceIndex] || AppState.races[0];
+            const isLastRace = AppState.currentRaceIndex >= AppState.races.length - 1;
+
+            let html = `
+        <div class="bg-slate-800/90 border border-slate-700 text-slate-100 p-3 rounded-xl flex items-center justify-between shadow-sm">
+          <div>
+            <span class="font-bold text-xs flex items-center gap-1.5 text-slate-200">🛠️ 幹事マスターパネル</span>
+            <span class="text-[10px] text-amber-300 font-num">進行中: 第${AppState.currentRaceIndex + 1}R / 全${AppState.races.length}R</span>
+          </div>
+          <span class="text-[10px] bg-slate-900 border border-slate-700 px-2 py-0.5 rounded text-slate-300 font-num">
+            投票: ${totalBets}/${totalGuests}名
+          </span>
+        </div>
+
+        <div class="grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-center text-xs font-bold">
+          <button onclick="setAdminTab('live')" class="py-1.5 rounded-lg transition-all ${AppState.adminTab === 'live'
+                    ? 'bg-amber-500 text-slate-950 shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }">
+            当日進行
+          </button>
+          <button onclick="setAdminTab('edit')" class="py-1.5 rounded-lg transition-all ${AppState.adminTab === 'edit'
+                    ? 'bg-slate-800 text-slate-200 border border-slate-700'
+                    : 'text-slate-400 hover:text-slate-200'
+                }">
+            問題登録
+          </button>
+          <button onclick="setAdminTab('cloud')" class="py-1.5 rounded-lg transition-all ${AppState.adminTab === 'cloud'
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-slate-400 hover:text-slate-200'
+                }">
+            Supabase
+          </button>
+        </div>
+      `;
+
+            if (AppState.adminTab === "live") {
+                html += `
+          <!-- レース進行バー -->
+          <div class="bg-slate-950 p-2.5 rounded-xl border border-slate-800 flex items-center justify-between">
+            <button onclick="prevRace()" ${AppState.currentRaceIndex === 0 ? 'disabled' : ''} class="px-2 py-1 bg-slate-900 rounded text-[11px] font-bold text-slate-300 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed border border-slate-800">
+              ◀ 前のR
+            </button>
+            <span class="text-xs font-bold text-amber-300 font-num">
+              第${AppState.currentRaceIndex + 1}R / 全${AppState.races.length}R
+            </span>
+            <button onclick="advanceToNextRace()" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 rounded text-[11px] font-bold text-amber-300 border border-slate-700">
+              ${isLastRace ? '総合表彰 ➔' : '次のR ➔'}
+            </button>
+          </div>
+
+          <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2">
+            <div class="flex items-center justify-between text-[11px] font-bold text-slate-300">
+              <span>出題レース:</span>
+              <span class="text-[9px] text-amber-300/80 font-num font-normal">${currentRace.name}</span>
+            </div>
+            <select onchange="changeCurrentRace(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-slate-100 font-medium focus:border-amber-400 focus:outline-none">
+              ${AppState.races.map((r, i) => `
+                <option value="${i}" ${AppState.currentRaceIndex === i ? 'selected' : ''}>
+                  ${r.name}
+                </option>
+              `).join('')}
+            </select>
+            <div class="p-2 bg-slate-900 rounded-lg border border-slate-800 text-xs text-slate-300 leading-snug">
+              <span class="text-amber-300/80 text-[10px] block font-num font-bold">QUESTION:</span>
+              ${currentRace.question}
+            </div>
+          </div>
+
+          <!-- 正解着順指定 -->
+          <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2">
+            <div class="text-[11px] font-bold text-amber-300/90 flex items-center justify-between">
+              <span>このレースの正解着順（1〜3着）:</span>
+            </div>
+            <div class="space-y-1.5 text-xs">
+              <div class="flex items-center gap-2">
+                <span class="w-12 bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold px-1 py-1 rounded text-center text-[10px] font-num">1着</span>
+                <select id="sel-ans-1" onchange="syncAdminAnswers()" class="flex-1 bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-slate-100">
+                  ${HORSES_DATA.map((h, i) => `
+                    <option value="${i}" ${AppState.correctOrder[0] === i ? 'selected' : ''}>
+                      [${h.letter}] ${h.title}
+                    </option>
+                  `).join('')}
+                </select>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="w-12 bg-slate-800 border border-slate-700 text-slate-300 font-bold px-1 py-1 rounded text-center text-[10px] font-num">2着</span>
+                <select id="sel-ans-2" onchange="syncAdminAnswers()" class="flex-1 bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-slate-100">
+                  ${HORSES_DATA.map((h, i) => `
+                    <option value="${i}" ${AppState.correctOrder[1] === i ? 'selected' : ''}>
+                      [${h.letter}] ${h.title}
+                    </option>
+                  `).join('')}
+                </select>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="w-12 bg-amber-900/30 border border-amber-800 text-amber-400 font-bold px-1 py-1 rounded text-center text-[10px] font-num">3着</span>
+                <select id="sel-ans-3" onchange="syncAdminAnswers()" class="flex-1 bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-slate-100">
+                  ${HORSES_DATA.map((h, i) => `
+                    <option value="${i}" ${AppState.correctOrder[2] === i ? 'selected' : ''}>
+                      [${h.letter}] ${h.title}
+                    </option>
+                  `).join('')}
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- レース発走・進行ボタン -->
+          <div class="space-y-2">
+            ${AppState.status === 'idle' ? `
+              <button onclick="startDerbyRace()" class="w-full bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl text-xs shadow-md flex items-center justify-center gap-2 transition-all">
+                <span>🏇 第${AppState.currentRaceIndex + 1}R 3D競馬発走スタート</span>
+              </button>
+            ` : AppState.status === 'racing' ? `
+              <button disabled class="w-full bg-slate-800 text-slate-500 font-medium py-3 rounded-xl text-xs flex items-center justify-center gap-2 cursor-not-allowed">
+                <span>第${AppState.currentRaceIndex + 1}R 激走中継中...</span>
+              </button>
+            ` : `
+              <button onclick="advanceToNextRace()" class="w-full bg-gradient-to-r from-amber-400 to-yellow-500 hover:from-amber-300 hover:to-yellow-400 text-slate-950 font-black py-3 rounded-xl text-xs shadow-md flex items-center justify-center gap-2 transition-all">
+                <span>${isLastRace ? '🏆 総合表彰式（グランドフィナーレ）を表示' : `次へ進む（第${AppState.currentRaceIndex + 2}R） ➔`}</span>
+              </button>
+            `}
+
+            <div class="grid grid-cols-2 gap-2">
+              <button onclick="resetCurrentRaceOnly()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-2 rounded-lg text-xs border border-slate-700 transition-all">
+                このRを再投票
+              </button>
+              <button onclick="resetEntireTournament()" class="bg-slate-900 hover:bg-red-950/40 text-rose-400 font-medium py-2 rounded-lg text-xs border border-slate-800 transition-all">
+                全スコアリセット
+              </button>
+            </div>
+          </div>
+
+          <!-- 累計得点リーダーボード -->
+          <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2">
+            <div class="text-[11px] font-bold text-slate-300 flex items-center justify-between">
+              <span>🏆 累計得点ランキング</span>
+              <span class="text-[9px] text-amber-300 font-num">全R累計</span>
+            </div>
+            <div class="space-y-1 text-xs">
+              ${getSortedParticipants().map((u, i) => `
+                <div class="flex items-center justify-between p-1.5 rounded bg-slate-900 border border-slate-800/80">
+                  <div class="flex items-center gap-2">
+                    <span class="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center font-num ${i === 0 ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-400'}">${i + 1}</span>
+                    <span class="font-medium text-slate-200 truncate max-w-[110px]">${u.name}</span>
+                  </div>
+                  <span class="font-num font-bold text-amber-300">${u.score} pt</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `;
+            } else if (AppState.adminTab === "edit") {
+                html += `
+          <!-- 設問編集タブ -->
+          <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-slate-200">レース質問・選択肢の事前登録</span>
+              <button onclick="addNewBlankRace()" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded text-[10px] border border-slate-700">
+                ＋ 新規R追加
+              </button>
+            </div>
+
+            <div>
+              <label class="text-[10px] font-medium text-slate-400 block mb-1">編集するレース:</label>
+              <select id="edit-race-select" onchange="changeCurrentRace(this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-slate-100 font-medium">
+                ${AppState.races.map((r, i) => `
+                  <option value="${i}" ${AppState.currentRaceIndex === i ? 'selected' : ''}>
+                    ${r.name}
+                  </option>
+                `).join('')}
+              </select>
+            </div>
+
+            <div class="space-y-2">
+              <div>
+                <label class="text-[10px] font-medium text-slate-400 block mb-1">レース名:</label>
+                <input id="input-race-name" type="text" value="${escapeHtml(currentRace.name)}" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-slate-100 font-medium focus:border-amber-400 focus:outline-none" />
+              </div>
+              <div>
+                <label class="text-[10px] font-medium text-slate-400 block mb-1">質問文（スクリーンに表示）:</label>
+                <textarea id="input-race-question" rows="2" class="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-slate-100 font-medium focus:border-amber-400 focus:outline-none">${escapeHtml(currentRace.question)}</textarea>
+              </div>
+            </div>
+
+            <div>
+              <label class="text-[10px] font-medium text-slate-400 block mb-1.5 flex items-center justify-between">
+                <span>出走馬の選択肢（A〜H）:</span>
+              </label>
+              <div class="space-y-1.5 max-h-56 overflow-y-auto pr-1">
+                ${HORSES_DATA.map((h, i) => `
+                  <div class="flex items-center gap-2">
+                    <span class="w-5 h-5 rounded flex items-center justify-center font-bold text-xs font-num shrink-0 shadow ${h.num === 1 ? 'text-black' : 'text-white'}" style="background-color: ${h.color}">
+                      ${h.letter}
+                    </span>
+                    <input id="input-opt-${i}" type="text" value="${escapeHtml(currentRace.options[i] || '')}" placeholder="選択肢${h.letter}" class="flex-1 bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-slate-100 focus:border-amber-400 focus:outline-none" />
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+
+            <div class="pt-1 space-y-2">
+              <button onclick="saveCurrentRaceEdits()" class="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 rounded-lg text-xs shadow-sm transition-all">
+                このレース内容を保存
+              </button>
+              <button onclick="resetToSampleRaces()" class="w-full bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 py-1.5 rounded text-[10px] border border-slate-800 transition-all">
+                初期サンプルレースに戻す
+              </button>
+            </div>
+          </div>
+        `;
+            } else if (AppState.adminTab === "cloud") {
+                html += `
+          <!-- Supabase接続＆SQL設計タブ -->
+          <div class="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-3 text-xs">
+            <div class="flex items-center justify-between border-b border-slate-800 pb-2">
+              <span class="font-bold text-slate-200 flex items-center gap-1.5">
+                ⚡ Supabase リアルタイム接続設定
+              </span>
+              <span class="text-[10px] ${AppState.isCloudConnected ? 'text-emerald-400 font-bold' : 'text-slate-500'}">
+                ${AppState.isCloudConnected ? '● 接続完了' : '○ 未接続'}
+              </span>
+            </div>
+
+            <p class="text-[11px] text-slate-400 leading-relaxed">
+              SupabaseプロジェクトのURLとanon keyを入力すると、50台のスマホと会場プロジェクターがリアルタイムに即座に同期します。
+            </p>
+
+            <div class="space-y-2">
+              <div>
+                <label class="text-[10px] font-medium text-slate-400 block mb-1">Project URL:</label>
+                <input id="input-supabase-url" type="text" placeholder="https://xxx.supabase.co" value="${escapeHtml(AppState.supabaseUrl)}" class="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-slate-100 font-mono focus:border-amber-400 focus:outline-none" />
+              </div>
+              <div>
+                <label class="text-[10px] font-medium text-slate-400 block mb-1">anon public key:</label>
+                <input id="input-supabase-key" type="password" placeholder="eyJhbGciOiJIUzI1NiIsIn..." value="${escapeHtml(AppState.supabaseKey)}" class="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-slate-100 font-mono focus:border-amber-400 focus:outline-none" />
+              </div>
+              <button onclick="saveSupabaseSettings()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 rounded-lg text-xs transition-all shadow-sm">
+                接続情報を保存して接続テスト
+              </button>
+            </div>
+
+            <div class="pt-2 border-t border-slate-800">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-[10px] font-bold text-amber-300">エンジニア用 SQL 定義（コピペ用）:</span>
+                <button onclick="copySqlSchema()" class="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-0.5 rounded border border-slate-700">
+                  SQLコピー
+                </button>
+              </div>
+              <textarea id="schema-sql" readonly class="w-full h-28 bg-slate-900 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-400 leading-tight select-all">-- Supabase SQL Editorで実行
+create table if not exists public.game_state (
+  id text primary key default 'current_game',
+  round_index int default 0,
+  status text default 'idle',
+  correct_order int[] default array[6,4,0],
+  updated_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+create table if not exists public.guest_bets (
+  id uuid default gen_random_uuid() primary key,
+  round_index int not null,
+  guest_name text not null,
+  bet_slip int[] not null,
+  score int default 0,
+  created_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+-- Realtimeのブロードキャストを有効化
+alter publication supabase_realtime add table public.game_state;
+alter publication supabase_realtime add table public.guest_bets;</textarea>
+            </div>
+          </div>
+        `;
+            }
+
+            el.innerHTML = html;
+        }
+
+        function saveSupabaseSettings() {
+            const urlEl = document.getElementById("input-supabase-url");
+            const keyEl = document.getElementById("input-supabase-key");
+            if (!urlEl || !keyEl) return;
+
+            AppState.supabaseUrl = urlEl.value.trim();
+            AppState.supabaseKey = keyEl.value.trim();
+            localStorage.setItem("wedding_supabase_url", AppState.supabaseUrl);
+            localStorage.setItem("wedding_supabase_key", AppState.supabaseKey);
+
+            initSupabaseIfConfigured();
+            renderAdminScreen();
+        }
+
+        function copySqlSchema() {
+            const sqlEl = document.getElementById("schema-sql");
+            if (!sqlEl) return;
+            sqlEl.select();
+            document.execCommand('copy');
+            const commEl = document.getElementById("commentary-banner");
+            if (commEl) commEl.innerText = "【コピー完了】Supabase用テーブル定義SQLをクリップボードにコピーしました！";
+        }
+
+        function setAdminTab(tab) {
+            AppState.adminTab = tab;
+            renderAdminScreen();
+        }
+
+        function escapeHtml(str) {
+            if (!str) return "";
+            return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        }
+
+        function changeCurrentRace(idxStr) {
+            const idx = parseInt(idxStr, 10);
+            if (isNaN(idx) || !AppState.races[idx]) return;
+            AppState.currentRaceIndex = idx;
+            AppState.status = "idle";
+            AppState.currentUser.betSlip = null;
+            userSelections = [];
+            applyCurrentRaceToHorses();
+            simulateMockGuestBets();
+            resetHorsePositions();
+            updateStatusBadge();
+            broadcastGameState();
+            renderOddsBoard();
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        function startDerbyRace(isRemote = false) {
+            if (AppState.status === "racing") return;
+            resetHorsePositions();
+            AppState.status = "racing";
+            updateStatusBadge();
+            sound.playFanfare();
+            if (!isRemote) {
+                broadcastGameState();
+            }
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        function prevRace() {
+            if (AppState.currentRaceIndex > 0) {
+                changeCurrentRace(AppState.currentRaceIndex - 1);
+            }
+        }
+
+        function addNewBlankRace() {
+            const newIdx = AppState.races.length + 1;
+            const newRace = {
+                id: "race_" + Date.now(),
+                name: `第${newIdx}R：新設レース`,
+                question: `新郎新婦に関するクイズ第${newIdx}問`,
+                options: [
+                    "選択肢A", "選択肢B", "選択肢C", "選択肢D",
+                    "選択肢E", "選択肢F", "選択肢G", "選択肢H"
+                ],
+                correctOrder: [0, 1, 2]
+            };
+            AppState.races.push(newRace);
+            AppState.currentRaceIndex = AppState.races.length - 1;
+            applyCurrentRaceToHorses();
+            persistRaces();
+            renderOddsBoard();
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        function saveCurrentRaceEdits() {
+            const nameInput = document.getElementById("input-race-name");
+            const questionInput = document.getElementById("input-race-question");
+            if (!nameInput || !questionInput) return;
+
+            const current = AppState.races[AppState.currentRaceIndex];
+            if (!current) return;
+
+            current.name = nameInput.value.trim() || `第${AppState.currentRaceIndex + 1}R`;
+            current.question = questionInput.value.trim() || "クイズ質問文";
+
+            for (let i = 0; i < 8; i++) {
+                const optInput = document.getElementById(`input-opt-${i}`);
+                if (optInput) {
+                    current.options[i] = optInput.value.trim() || `選択肢${HORSES_DATA[i].letter}`;
+                }
+            }
+
+            applyCurrentRaceToHorses();
+            persistRaces();
+
+            renderOddsBoard();
+            renderPhoneScreen();
+            renderAdminScreen();
+
+            const banner = document.getElementById("commentary-banner");
+            if (banner) {
+                banner.innerText = `【保存完了】「${current.name}」の内容を保存しました！`;
+            }
+        }
+
+        function persistRaces() {
+            try {
+                localStorage.setItem("wedding_derby_races_v2", JSON.stringify(AppState.races));
+            } catch (e) {
+                console.warn("Storage save error:", e);
+            }
+        }
+
+        function resetToSampleRaces() {
+            AppState.races = JSON.parse(JSON.stringify(DEFAULT_RACES));
+            AppState.currentRaceIndex = 0;
+            applyCurrentRaceToHorses();
+            persistRaces();
+            renderOddsBoard();
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        function getSortedParticipants() {
+            const list = [AppState.currentUser, ...(AppState.mockGuests || [])];
+            return list.slice().sort((a, b) => (b.score || 0) - (a.score || 0));
+        }
+
+        function syncAdminAnswers() {
+            const el1 = document.getElementById("sel-ans-1");
+            const el2 = document.getElementById("sel-ans-2");
+            const el3 = document.getElementById("sel-ans-3");
+            if (el1 && el2 && el3) {
+                AppState.correctOrder = [
+                    parseInt(el1.value, 10),
+                    parseInt(el2.value, 10),
+                    parseInt(el3.value, 10)
+                ];
+                // レースデータにも反映
+                if (AppState.races[AppState.currentRaceIndex]) {
+                    AppState.races[AppState.currentRaceIndex].correctOrder = [...AppState.correctOrder];
+                    persistRaces();
+                }
+            }
+        }
+
+        function resetCurrentRaceOnly() {
+            AppState.status = "idle";
+            AppState.currentUser.betSlip = null;
+            userSelections = [];
+            resetHorsePositions();
+            simulateMockGuestBets();
+            updateStatusBadge();
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        function resetEntireTournament() {
+            AppState.currentRaceIndex = 0;
+            AppState.status = "idle";
+            AppState.currentUser.score = 0;
+            AppState.currentUser.betSlip = null;
+            AppState.mockGuests.forEach(g => {
+                g.score = 0;
+                g.betSlip = null;
+            });
+            userSelections = [];
+            applyCurrentRaceToHorses();
+            simulateMockGuestBets();
+            resetHorsePositions();
+            updateStatusBadge();
+
+            const modal1 = document.getElementById("result-overlay");
+            if (modal1) modal1.classList.add("hidden");
+            const modal2 = document.getElementById("grand-finale-overlay");
+            if (modal2) modal2.classList.add("hidden");
+
+            renderOddsBoard();
+            renderPhoneScreen();
+            renderAdminScreen();
+        }
+
+        function updateStatusBadge() {
+            const badge = document.getElementById("badge-status");
+            const label = document.getElementById("status-label");
+            if (!badge || !label) return;
+
+            const rNum = AppState.currentRaceIndex + 1;
+
+            if (AppState.status === "racing") {
+                badge.className = "px-3 py-1 rounded-full font-medium text-[11px] border tracking-wide bg-rose-950/50 text-rose-300 border-rose-800 flex items-center gap-2";
+                label.innerText = `第${rNum}R レース中継中`;
+            } else if (AppState.status === "result") {
+                badge.className = "px-3 py-1 rounded-full font-medium text-[11px] border tracking-wide bg-amber-950/40 text-amber-300 border-amber-800 flex items-center gap-2";
+                label.innerText = `第${rNum}R 着順確定`;
+            } else if (AppState.status === "grand_finale") {
+                badge.className = "px-3 py-1 rounded-full font-medium text-[11px] border tracking-wide bg-yellow-950/40 text-yellow-300 border-yellow-700 flex items-center gap-2";
+                label.innerText = `総合優勝発表`;
+            } else {
+                badge.className = "px-3 py-1 rounded-full font-medium text-[11px] border tracking-wide bg-slate-900 text-slate-300 border-slate-800 flex items-center gap-2";
+                label.innerText = `第${rNum}R 投票受付中`;
+            }
+        }
+    </script>
+
+    <script>
+        function switchLayout(mode) {
+            const phoneP = document.getElementById("panel-phone");
+            const monP = document.getElementById("panel-monitor");
+            const admP = document.getElementById("panel-admin");
+            const guide = document.getElementById("guide-banner");
+
+            const tAll = document.getElementById("tab-all");
+            const tMon = document.getElementById("tab-monitor-only");
+            const tPho = document.getElementById("tab-phone-only");
+            const tAdm = document.getElementById("tab-admin-only");
+
+            [tAll, tMon, tPho, tAdm].forEach(b => {
+                b.className = "px-3 py-1 rounded-lg text-xs font-medium transition-all text-slate-400 hover:text-slate-200";
+            });
+
+            if (mode === "all") {
+                tAll.className = "px-3 py-1 rounded-lg text-xs font-bold transition-all bg-amber-500 text-slate-950 shadow-sm";
+                phoneP.classList.remove("hidden");
+                monP.classList.remove("hidden");
+                admP.classList.remove("hidden");
+                monP.className = "lg:col-span-5 flex flex-col w-full";
+                guide.classList.remove("hidden");
+            } else if (mode === "monitor") {
+                tMon.className = "px-3 py-1 rounded-lg text-xs font-bold transition-all bg-amber-500 text-slate-950 shadow-sm";
+                phoneP.classList.add("hidden");
+                admP.classList.add("hidden");
+                monP.classList.remove("hidden");
+                monP.className = "lg:col-span-12 flex flex-col w-full";
+                guide.classList.add("hidden");
+            } else if (mode === "phone") {
+                tPho.className = "px-3 py-1 rounded-lg text-xs font-bold transition-all bg-amber-500 text-slate-950 shadow-sm";
+                monP.classList.add("hidden");
+                admP.classList.add("hidden");
+                phoneP.classList.remove("hidden");
+                phoneP.className = "lg:col-span-12 flex flex-col items-center w-full";
+                guide.classList.add("hidden");
+            } else if (mode === "admin") {
+                tAdm.className = "px-3 py-1 rounded-lg text-xs font-bold transition-all bg-amber-500 text-slate-950 shadow-sm";
+                phoneP.classList.add("hidden");
+                monP.classList.add("hidden");
+                admP.classList.remove("hidden");
+                admP.className = "lg:col-span-12 flex flex-col max-w-xl mx-auto w-full";
+                guide.classList.add("hidden");
+            }
+
+            setTimeout(onWindowResize, 60);
+        }
+
+        // 起動時の初期化ブートストラップ
+        window.addEventListener("DOMContentLoaded", () => {
+            initThreeScene();
+            initSupabaseIfConfigured();
+            renderOddsBoard();
+            renderPhoneScreen();
+            renderAdminScreen();
+            updateStatusBadge();
+            animateDerby();
+        });
+    </script>
+</body>
+
+</html>
