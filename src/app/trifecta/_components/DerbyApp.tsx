@@ -1530,6 +1530,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         setIssuedBetSlip(null);
         setSelectedChoices([]);
         setCorrectOrder(newOrder);
+        correctOrderRef.current = newOrder;
         // 前レースの馬券は破棄
         setParticipants(prev => prev.map(p => ({ ...p, betSlip: null })));
         resetHorsePositions();
@@ -1604,14 +1605,64 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }).catch(err => console.error("Reset DB error:", err));
     }, [races, resetHorsePositions, broadcastGameState, loadInitialDataFromDB, sendEvent]);
 
-    // 幹事：正解着順の変更（重複禁止）＋ races 側にも保持
+    // 幹事：正解着順の変更（他順位と自動スワップ）＋ races・DB・リアルタイム同期へ即時反映
     const updateCorrectOrder = useCallback((rank: number, val: number) => {
-        if (correctOrder.some((c, rIdx) => rIdx !== rank && c === val)) return;
-        const next = [...correctOrder];
+        const current = [...(correctOrderRef.current || [0, 1, 2])];
+        const next: BetOrder = [current[0] ?? 0, current[1] ?? 1, current[2] ?? 2];
+
+        // 既に他の着順に入っている場合は入れ替え（スワップ）
+        const existingIdx = next.findIndex((c, rIdx) => rIdx !== rank && c === val);
+        if (existingIdx !== -1) {
+            next[existingIdx] = next[rank];
+        }
         next[rank] = val;
+
+        correctOrderRef.current = next;
         setCorrectOrder(next);
-        setRaces(rs => rs.map((r, i) => (i === currentRaceIndex ? { ...r, correctOrder: next } : r)));
-    }, [correctOrder, currentRaceIndex]);
+
+        // races 側にも保持
+        const updatedRaces = races.map((r, i) => (i === currentRaceIndex ? { ...r, correctOrder: next } : r));
+        setRaces(updatedRaces);
+
+        try {
+            localStorage.setItem('derby_saved_races', JSON.stringify(updatedRaces));
+        } catch (e) {
+            console.warn(e);
+        }
+
+        // リアルタイム配信
+        broadcastGameState(statusRef.current, currentRaceIndex, next);
+
+        // DBへ即座に永続化（定期同期などで古いデータに戻るのを防止）
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: 'update_game',
+                status: statusRef.current,
+                currentRaceIndex,
+                correctOrder: next
+            })
+        }).catch(err => console.error("Update game correctOrder error:", err));
+
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: 'save_races',
+                races: updatedRaces.map((r, i) => ({
+                    id: r.id,
+                    roundIndex: i,
+                    name: r.name,
+                    question: r.question,
+                    options: r.options,
+                    correctOrder: r.correctOrder
+                }))
+            })
+        }).catch(err => console.error("Save races correctOrder error:", err));
+
+        setToastMessage(`第${currentRaceIndex + 1}Rの正解着順を更新しました`);
+    }, [currentRaceIndex, races, broadcastGameState]);
 
     // 問題編集（イミュータブル更新：以前は DEFAULT_DERBY_RACES 自体を書き換えていた）
     const updateRaceField = useCallback((field: 'name' | 'question', value: string) => {
@@ -1942,6 +1993,21 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             )}
 
+                                            {/* 総合表彰式中のスマホ案内 */}
+                                            {gameStatus === 'grand_finale' && (
+                                                <div className="bg-slate-900 border border-amber-500/40 p-5 rounded-2xl text-center space-y-3 shadow-xl">
+                                                    <div className="text-3xl animate-bounce">🏆</div>
+                                                    <div className="text-base font-black text-amber-300">総合表彰式 開催中！</div>
+                                                    <p className="text-xs text-slate-300">
+                                                        全3レース終了！会場メインスクリーンで最終表彰式が行われています！
+                                                    </p>
+                                                    <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
+                                                        <span className="text-xs text-slate-400 font-bold">あなたの最終スコア</span>
+                                                        <span className="text-lg font-black text-amber-400 font-mono">{myScore} pt</span>
+                                                    </div>
+                                                </div>
+                                            )}
+
                                             {/* 投票フォーム */}
                                             {gameStatus === 'idle' && (
                                                 issuedBetSlip ? (
@@ -2102,69 +2168,308 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                         </div>
                                     </div>
 
-                                    {/* 着順確定モーダル */}
+                                    {/* 着順確定画面（画面いっぱいフルスクリーン） */}
                                     {gameStatus === 'result' && (
-                                        <div className="absolute inset-0 z-40 bg-slate-950/90 backdrop-blur flex flex-col items-center justify-center p-5 text-center">
-                                            <div className="w-full max-w-sm bg-slate-900 border border-amber-500/40 rounded-2xl p-5 shadow-2xl space-y-3">
-                                                <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-3 py-1 rounded-full font-bold">
-                                                    第{currentRaceIndex + 1}R 着順確定
-                                                </span>
-                                                <h2 className="text-base font-black text-white">サンレンタン確定結果</h2>
-                                                <div className="space-y-1.5 text-left text-xs">
-                                                    {correctOrder.map((hIdx, rank) => {
-                                                        const h = HORSES_DATA[hIdx];
-                                                        return (
-                                                            <div key={rank} className="flex items-center justify-between p-2 bg-slate-950 rounded-xl border border-slate-800">
-                                                                <div className="flex items-center gap-2">
-                                                                    <span className="font-bold text-amber-400 font-mono text-[11px]">{rank === 0 ? '🥇1着' : rank === 1 ? '🥈2着' : '🥉3着'}</span>
-                                                                    <span className="w-4 h-4 rounded text-[9px] font-black flex items-center justify-center text-white" style={{ backgroundColor: h.color }}>{h.letter}</span>
-                                                                    <span className="font-bold text-white truncate max-w-[140px]">{currentRace.options[hIdx]}</span>
-                                                                </div>
-                                                                <span className="text-amber-300 font-mono">{horseOddsList[hIdx]}倍</span>
-                                                            </div>
-                                                        );
-                                                    })}
+                                        <div className="absolute inset-0 z-40 bg-slate-950/95 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6 lg:p-8 text-center animate-fade-in overflow-y-auto">
+                                            {/* 上部ヘッダー */}
+                                            <div className="shrink-0 space-y-1 sm:space-y-2">
+                                                <div className="inline-flex items-center gap-2 px-3 sm:px-5 py-1 sm:py-1.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-amber-300 font-black text-xs sm:text-sm tracking-wider shadow-lg">
+                                                    <span className="text-sm sm:text-base">🏁</span>
+                                                    <span>第{currentRaceIndex + 1}レース 確定</span>
+                                                    <span className="text-slate-500">|</span>
+                                                    <span>OFFICIAL RESULT</span>
                                                 </div>
+                                                <h1 className="text-xl sm:text-2xl lg:text-4xl font-black text-white tracking-wide drop-shadow">
+                                                    {currentRace.name}
+                                                </h1>
+                                                <p className="text-xs sm:text-sm lg:text-base text-amber-200/90 font-bold max-w-3xl mx-auto px-2">
+                                                    {currentRace.question}
+                                                </p>
+                                            </div>
+
+                                            {/* 中央 3連単確定着順メガカード（1着・2着・3着 横並び3列） */}
+                                            <div className="my-auto py-2 sm:py-4 w-full max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 lg:gap-6">
+                                                {correctOrder.map((hIdx, rank) => {
+                                                    const h = HORSES_DATA[hIdx];
+                                                    const isFirst = rank === 0;
+                                                    const isSecond = rank === 1;
+
+                                                    const cardStyles = isFirst
+                                                        ? {
+                                                            bg: 'bg-gradient-to-b from-amber-500/25 via-slate-900/95 to-slate-950',
+                                                            border: 'border-2 border-amber-400 shadow-[0_0_35px_rgba(245,158,11,0.3)]',
+                                                            badge: 'bg-gradient-to-r from-amber-400 to-yellow-300 text-slate-950 font-black',
+                                                            label: '🥇 1着 (WINNER)',
+                                                            accent: 'text-amber-300',
+                                                            scale: 'md:scale-105 z-10'
+                                                        }
+                                                        : isSecond
+                                                        ? {
+                                                            bg: 'bg-gradient-to-b from-slate-300/15 via-slate-900/95 to-slate-950',
+                                                            border: 'border-2 border-slate-300/70 shadow-[0_0_20px_rgba(203,213,225,0.15)]',
+                                                            badge: 'bg-slate-200 text-slate-900 font-black',
+                                                            label: '🥈 2着',
+                                                            accent: 'text-slate-200',
+                                                            scale: ''
+                                                        }
+                                                        : {
+                                                            bg: 'bg-gradient-to-b from-amber-700/20 via-slate-900/95 to-slate-950',
+                                                            border: 'border-2 border-amber-600/70 shadow-[0_0_20px_rgba(180,83,9,0.15)]',
+                                                            badge: 'bg-amber-700 text-amber-100 font-black',
+                                                            label: '🥉 3着',
+                                                            accent: 'text-amber-400',
+                                                            scale: ''
+                                                        };
+
+                                                    return (
+                                                        <div
+                                                            key={rank}
+                                                            className={`${cardStyles.bg} ${cardStyles.border} ${cardStyles.scale} rounded-2xl sm:rounded-3xl p-4 sm:p-6 flex flex-col justify-between items-center text-center relative overflow-hidden transition-all`}
+                                                        >
+                                                            {/* 冠/ランクバッジ */}
+                                                            <div className={`px-3 sm:px-4 py-1 rounded-full text-xs sm:text-sm font-black mb-2 shadow ${cardStyles.badge}`}>
+                                                                {cardStyles.label}
+                                                            </div>
+
+                                                            {/* 馬番レター大バッジ */}
+                                                            <div
+                                                                className="w-14 h-14 sm:w-16 sm:h-16 lg:w-20 lg:h-20 rounded-2xl flex items-center justify-center text-white font-black text-2xl sm:text-3xl lg:text-4xl shadow-xl my-2 border-2 border-white/20"
+                                                                style={{ backgroundColor: h.color }}
+                                                            >
+                                                                {h.letter}
+                                                            </div>
+
+                                                            {/* 馬名 ＆ 選択肢テキスト */}
+                                                            <div className="my-1 sm:my-2 w-full">
+                                                                <div className="text-[10px] sm:text-xs text-slate-400 font-mono mb-1">{h.name}</div>
+                                                                <div className="text-base sm:text-lg lg:text-xl font-black text-white leading-snug break-words px-1">
+                                                                    {currentRace.options[hIdx]}
+                                                                </div>
+                                                            </div>
+
+                                                            {/* 単勝オッズ */}
+                                                            <div className="mt-2 pt-2 border-t border-slate-800/80 w-full flex items-center justify-center gap-1.5 font-mono">
+                                                                <span className="text-[10px] sm:text-xs text-slate-400">確定単勝</span>
+                                                                <span className={`text-base sm:text-xl font-black ${cardStyles.accent}`}>
+                                                                    {horseOddsList[hIdx]}倍
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+
+                                            {/* 下部：的中者速報 ＆ 進行アクション */}
+                                            <div className="shrink-0 w-full max-w-5xl mx-auto space-y-2.5 sm:space-y-3">
+                                                {/* 的中者ボード */}
+                                                {(() => {
+                                                    const hits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) > 0);
+                                                    const perfectHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 6);
+                                                    const trifectaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 4);
+                                                    const exactaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 3);
+
+                                                    return (
+                                                        <div className="bg-slate-900/90 border border-slate-800 rounded-xl sm:rounded-2xl p-3 sm:p-4 text-left shadow-lg">
+                                                            <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pb-2 border-b border-slate-800">
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="text-base">🎯</span>
+                                                                    <span className="font-black text-xs sm:text-sm text-white">このレースの的中者速報</span>
+                                                                    <span className="text-xs text-amber-400 font-bold font-mono">({hits.length}名 的中)</span>
+                                                                </div>
+                                                                <div className="flex items-center gap-3 text-[10px] sm:text-xs text-slate-400 font-medium">
+                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400"></span>3連単 +6pt</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400"></span>3連複 +4pt</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400"></span>2連単 +3pt</span>
+                                                                </div>
+                                                            </div>
+
+                                                            {hits.length === 0 ? (
+                                                                <div className="text-center py-1.5 text-xs sm:text-sm text-slate-400 font-medium">
+                                                                    該当者なし！波乱のレース展開となりました⚡️
+                                                                </div>
+                                                            ) : (
+                                                                <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto">
+                                                                    {perfectHits.map(p => (
+                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-black shadow-sm">
+                                                                            <span>👑 3連単!</span>
+                                                                            <span>{p.name}</span>
+                                                                            <span className="font-mono text-[10px] bg-amber-500 text-slate-950 px-1.5 py-0.5 rounded font-black">+6pt</span>
+                                                                        </span>
+                                                                    ))}
+                                                                    {trifectaHits.map(p => (
+                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-bold shadow-sm">
+                                                                            <span>✨ 3連複!</span>
+                                                                            <span>{p.name}</span>
+                                                                            <span className="font-mono text-[10px] bg-emerald-500 text-slate-950 px-1.5 py-0.5 rounded font-black">+4pt</span>
+                                                                        </span>
+                                                                    ))}
+                                                                    {exactaHits.map(p => (
+                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-300 text-xs font-bold shadow-sm">
+                                                                            <span>🎯 2連単!</span>
+                                                                            <span>{p.name}</span>
+                                                                            <span className="font-mono text-[10px] bg-blue-500 text-white px-1.5 py-0.5 rounded font-black">+3pt</span>
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
+
+                                                {/* 進行ボタン */}
                                                 {isAuthority ? (
                                                     <button
                                                         onClick={advanceToNextRace}
-                                                        className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs rounded-xl shadow transition-all"
+                                                        className="w-full py-3 sm:py-3.5 bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-sm sm:text-base rounded-xl sm:rounded-2xl shadow-xl transition-all transform hover:scale-[1.01]"
                                                     >
-                                                        {currentRaceIndex >= 2 ? '🏆 全3R終了！総合優勝発表へ ➔' : `次のレース（第${currentRaceIndex + 2}R）へ進む ➔`}
+                                                        {currentRaceIndex >= races.length - 1 ? '🏆 全3レース終了！栄光の総合表彰へ ➔' : `次のレース（第${currentRaceIndex + 2}R）へ進む ➔`}
                                                     </button>
                                                 ) : (
-                                                    <p className="text-[11px] text-slate-400">幹事が次のレースへ進めるまでお待ちください</p>
+                                                    <div className="py-2 text-xs sm:text-sm text-slate-400 font-medium">
+                                                        幹事が次のレースへ進めるまでお待ちください
+                                                    </div>
                                                 )}
                                             </div>
                                         </div>
                                     )}
 
-                                    {/* 総合優勝・グランドフィナーレ */}
+                                    {/* 総合優勝・グランドフィナーレ（画面いっぱい表彰式ステージ） */}
                                     {gameStatus === 'grand_finale' && (
-                                        <div className="absolute inset-0 z-50 bg-slate-950/95 backdrop-blur-lg flex flex-col items-center justify-center p-5 text-center">
-                                            <div className="w-full max-w-md bg-slate-900 border-2 border-amber-400 rounded-3xl p-6 shadow-2xl space-y-4">
-                                                <div className="text-4xl animate-bounce">🏆</div>
-                                                <h2 className="text-xl font-black text-white">3連単アンケートゲーム 総合表彰</h2>
-                                                <p className="text-xs text-slate-400">全3レース終了！栄光の3連単マスターは！？</p>
-                                                <div className="space-y-2 text-left">
-                                                    {allRankedParticipants.slice(0, 3).map((u, i) => (
-                                                        <div key={u.id} className="flex items-center justify-between p-3 rounded-2xl border border-slate-800 bg-slate-950">
-                                                            <div className="flex items-center gap-2.5">
-                                                                <span className={`w-7 h-7 rounded-xl flex items-center justify-center font-black text-xs font-mono ${i === 0 ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-slate-300'}`}>
-                                                                    {i + 1}
-                                                                </span>
-                                                                <div>
-                                                                    <span className="text-[10px] text-amber-300 font-bold block">{i === 0 ? '👑 CHAMPION' : `${i + 1}位`}</span>
-                                                                    <span className="text-xs font-bold text-white">{u.name}</span>
+                                        <div className="absolute inset-0 z-50 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 backdrop-blur-xl flex flex-col justify-between p-4 sm:p-6 lg:p-10 text-center animate-fade-in overflow-y-auto">
+                                            {/* 上部タイトル */}
+                                            <div className="shrink-0 space-y-1 sm:space-y-2">
+                                                <div className="inline-flex items-center gap-2 px-4 sm:px-6 py-1 sm:py-1.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-amber-300 font-black text-xs sm:text-sm tracking-widest shadow-xl">
+                                                    <span>🏆</span>
+                                                    <span>GRAND FINALE CEREMONY</span>
+                                                    <span>🏆</span>
+                                                </div>
+                                                <h1 className="text-2xl sm:text-3xl lg:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wide drop-shadow">
+                                                    3連単アンケートゲーム 総合表彰式
+                                                </h1>
+                                                <p className="text-xs sm:text-sm lg:text-base text-slate-300 font-medium">
+                                                    全3レースを制した、栄光の「3連単マスター」は誰の手に！？
+                                                </p>
+                                            </div>
+
+                                            {/* 中央 表彰台ポディウム（1位・2位・3位） */}
+                                            <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
+                                                <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6 items-end">
+                                                    {/* 🥈 2位 (準優勝) - 左 */}
+                                                    {(() => {
+                                                        const runnerUp = allRankedParticipants[1];
+                                                        return (
+                                                            <div className="order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-2 border-slate-300/80 rounded-2xl sm:rounded-3xl p-5 sm:p-6 flex flex-col items-center shadow-xl relative md:h-[340px] justify-between">
+                                                                <div className="w-10 h-10 rounded-full bg-slate-300 text-slate-900 flex items-center justify-center font-black text-lg shadow">
+                                                                    2
+                                                                </div>
+                                                                <span className="text-xs sm:text-sm font-bold text-slate-300 mt-1">🥈 準優勝</span>
+                                                                <div className="my-2 sm:my-3 text-center">
+                                                                    <div className="text-lg sm:text-xl lg:text-2xl font-black text-white truncate max-w-[200px]">
+                                                                        {runnerUp ? runnerUp.name : '―'}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="bg-slate-900/90 border border-slate-700 px-4 py-2 rounded-xl text-center w-full">
+                                                                    <span className="text-[10px] text-slate-400 block font-mono">TOTAL SCORE</span>
+                                                                    <span className="text-xl sm:text-2xl font-black font-mono text-slate-200">
+                                                                        {runnerUp ? runnerUp.score : 0} <span className="text-xs">pt</span>
+                                                                    </span>
+                                                                </div>
+                                                                <div className="hidden md:flex w-full h-8 bg-slate-800/60 rounded-lg mt-2 items-center justify-center text-[10px] text-slate-400 font-mono font-bold">
+                                                                    2ND PLACE
                                                                 </div>
                                                             </div>
-                                                            <span className="font-mono text-base font-black text-amber-300">{u.score} pt</span>
-                                                        </div>
-                                                    ))}
+                                                        );
+                                                    })()}
+
+                                                    {/* 🥇 1位 (総合優勝 CHAMPION) - 中央 (一番高く大きく目立たせる) */}
+                                                    {(() => {
+                                                        const champ = allRankedParticipants[0];
+                                                        return (
+                                                            <div className="order-1 md:order-2 bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-2 border-amber-400 rounded-2xl sm:rounded-3xl p-6 sm:p-8 flex flex-col items-center shadow-[0_0_45px_rgba(245,158,11,0.35)] relative md:h-[400px] justify-between transform md:-translate-y-4">
+                                                                <div className="absolute -top-7 inset-x-0 flex justify-center">
+                                                                    <span className="text-4xl animate-bounce drop-shadow">👑</span>
+                                                                </div>
+                                                                <div className="w-14 h-14 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 flex items-center justify-center font-black text-2xl shadow-xl mt-1">
+                                                                    1
+                                                                </div>
+                                                                <span className="text-sm sm:text-base font-black text-amber-300 tracking-wider">
+                                                                    🏆 総合優勝 CHAMPION 🏆
+                                                                </span>
+                                                                <div className="my-2 sm:my-3 text-center">
+                                                                    <div className="text-2xl sm:text-3xl lg:text-4xl font-black text-white drop-shadow truncate max-w-[240px]">
+                                                                        {champ ? champ.name : '―'}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="bg-amber-500/20 border border-amber-400/50 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
+                                                                    <span className="text-[10px] sm:text-xs text-amber-300 font-bold block font-mono">CHAMPION SCORE</span>
+                                                                    <span className="text-2xl sm:text-4xl font-black font-mono text-amber-300">
+                                                                        {champ ? champ.score : 0} <span className="text-sm sm:text-base">pt</span>
+                                                                    </span>
+                                                                </div>
+                                                                <div className="hidden md:flex w-full h-12 bg-amber-500/20 rounded-xl mt-2 items-center justify-center text-xs text-amber-300 font-black font-mono tracking-widest border border-amber-500/30">
+                                                                    👑 1ST PLACE WINNER 👑
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })()}
+
+                                                    {/* 🥉 3位 (第3位) - 右 */}
+                                                    {(() => {
+                                                        const third = allRankedParticipants[2];
+                                                        return (
+                                                            <div className="order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-2 border-amber-700/80 rounded-2xl sm:rounded-3xl p-5 sm:p-6 flex flex-col items-center shadow-xl relative md:h-[300px] justify-between">
+                                                                <div className="w-10 h-10 rounded-full bg-amber-700 text-amber-100 flex items-center justify-center font-black text-lg shadow">
+                                                                    3
+                                                                </div>
+                                                                <span className="text-xs sm:text-sm font-bold text-amber-500 mt-1">🥉 第3位</span>
+                                                                <div className="my-2 sm:my-3 text-center">
+                                                                    <div className="text-lg sm:text-xl lg:text-2xl font-black text-white truncate max-w-[200px]">
+                                                                        {third ? third.name : '―'}
+                                                                    </div>
+                                                                </div>
+                                                                <div className="bg-slate-900/90 border border-slate-800 px-4 py-2 rounded-xl text-center w-full">
+                                                                    <span className="text-[10px] text-slate-400 block font-mono">TOTAL SCORE</span>
+                                                                    <span className="text-xl sm:text-2xl font-black font-mono text-amber-400">
+                                                                        {third ? third.score : 0} <span className="text-xs">pt</span>
+                                                                    </span>
+                                                                </div>
+                                                                <div className="hidden md:flex w-full h-6 bg-slate-900 rounded-lg mt-2 items-center justify-center text-[10px] text-slate-500 font-mono font-bold">
+                                                                    3RD PLACE
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })()}
                                                 </div>
+
+                                                {/* 4位以下の全参加者一覧 */}
+                                                {allRankedParticipants.length > 3 && (
+                                                    <div className="w-full mt-4 sm:mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-3 sm:p-4 text-left shadow-lg">
+                                                        <span className="text-xs font-bold text-slate-400 block mb-2">4位以下のランキング:</span>
+                                                        <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto">
+                                                            {allRankedParticipants.slice(3).map((u, i) => (
+                                                                <span key={u.id} className="inline-flex items-center gap-2 px-3 py-1 rounded-xl bg-slate-950 border border-slate-800 text-xs">
+                                                                    <span className="font-mono text-slate-400 font-bold">{i + 4}位</span>
+                                                                    <span className="text-white font-medium">{u.name}</span>
+                                                                    <span className="font-mono text-amber-400 font-bold">{u.score}pt</span>
+                                                                </span>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            {/* 下部ボタン */}
+                                            <div className="shrink-0 w-full max-w-md mx-auto">
                                                 {isAuthority && (
-                                                    <button onClick={() => setGameStatus('idle')} className="w-full py-2 bg-slate-800 text-slate-300 rounded-xl text-xs hover:bg-slate-700">
-                                                        閉じる（結果表示維持）
+                                                    <button
+                                                        onClick={() => {
+                                                            setGameStatus('idle');
+                                                            statusRef.current = 'idle';
+                                                            broadcastGameState('idle', currentRaceIndex, correctOrder);
+                                                        }}
+                                                        className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs transition-all border border-slate-700 shadow"
+                                                    >
+                                                        表彰画面を終了して待機画面へ戻る
                                                     </button>
                                                 )}
                                             </div>
@@ -2252,9 +2557,12 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 <div className="text-[11px] text-slate-300 font-bold">{currentRace.question}</div>
                                             </div>
 
-                                            {/* 正解着順指定（重複禁止バリデーション） */}
+                                            {/* 正解着順指定（自動スワップ対応） */}
                                             <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-2">
-                                                <span className="text-[10px] text-amber-300 font-bold block">このレースの正解着順（1〜3着）:</span>
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-[10px] text-amber-300 font-bold block">このレースの正解着順（1〜3着）:</span>
+                                                    <span className="text-[9px] text-slate-400">重複時は自動で入れ替わります</span>
+                                                </div>
                                                 {[0, 1, 2].map(rank => (
                                                     <div key={rank} className="flex items-center gap-2 text-xs">
                                                         <span className="w-10 bg-slate-800 text-amber-400 font-mono py-1 rounded text-center text-[10px] font-bold">
@@ -2266,11 +2574,14 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                             disabled={gameStatus === 'racing'}
                                                             className="flex-1 bg-slate-900 border border-slate-700 rounded p-1 text-xs text-white"
                                                         >
-                                                            {HORSES_DATA.map((h, i) => (
-                                                                <option key={i} value={i} disabled={correctOrder.some((c, rIdx) => rIdx !== rank && c === i)}>
-                                                                    [{h.letter}] {currentRace.options[i]}
-                                                                </option>
-                                                            ))}
+                                                            {HORSES_DATA.map((h, i) => {
+                                                                const otherRank = correctOrder.findIndex((c, rIdx) => rIdx !== rank && c === i);
+                                                                return (
+                                                                    <option key={i} value={i}>
+                                                                        [{h.letter}] {currentRace.options[i]} {otherRank !== -1 ? `(現在${otherRank + 1}着と入替)` : ''}
+                                                                    </option>
+                                                                );
+                                                            })}
                                                         </select>
                                                     </div>
                                                 ))}
