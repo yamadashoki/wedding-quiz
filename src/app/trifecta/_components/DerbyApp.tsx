@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
+import { supabase } from '@/lib/supabase';
 
 // ==============================================================
 // アイコン（lucide-react 互換の見た目をインラインSVGで定義）
@@ -783,7 +784,50 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     participantsRef.current = participants;
 
     // --------------------------------------------------------------
-    // 初期化（localStorage 読み込み）
+    // Supabase DB から最新データを取得（参照）
+    // --------------------------------------------------------------
+    const loadInitialDataFromDB = useCallback(async () => {
+        try {
+            const res = await fetch('/api/trifecta', { cache: 'no-store' });
+            if (!res.ok) return;
+            const json = await res.json();
+            if (json.success && json.data) {
+                const { game, races: fetchedRaces, participants: fetchedParticipants } = json.data;
+                if (fetchedRaces && fetchedRaces.length > 0) {
+                    setRaces(fetchedRaces);
+                }
+                if (fetchedParticipants) {
+                    setParticipants(fetchedParticipants);
+                    // 自分の投票状態・スコアを復元
+                    const myId = participantIdRef.current;
+                    const mine = fetchedParticipants.find((p: Participant) => p.id === myId);
+                    if (mine) {
+                        if (mine.betSlip) {
+                            setIssuedBetSlip(mine.betSlip);
+                        }
+                        if (typeof mine.score === 'number') {
+                            setParticipantScore(mine.score);
+                        }
+                    }
+                }
+                if (game) {
+                    setCurrentRaceIndex(game.currentRaceIndex);
+                    raceIndexRef.current = game.currentRaceIndex;
+                    setGameStatus(game.status);
+                    statusRef.current = game.status;
+                    if (game.correctOrder) {
+                        setCorrectOrder(game.correctOrder);
+                        correctOrderRef.current = game.correctOrder;
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn("DB load warning:", e);
+        }
+    }, []);
+
+    // --------------------------------------------------------------
+    // 初期化（localStorage 読み込み ＋ Supabase DB からデータ取得）
     // --------------------------------------------------------------
     useEffect(() => {
         setIsMounted(true);
@@ -800,23 +844,22 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 const savedName = localStorage.getItem('derby_participant_name') || '';
                 if (savedName) setParticipantName(savedName);
             }
-
-            // 問題データは幹事側だけが持つ（他の画面には幹事から配信される）
-            const savedRaces = isAuthority ? localStorage.getItem('derby_saved_races') : null;
-            if (savedRaces) {
-                const parsed = JSON.parse(savedRaces) as DerbyRace[];
-                if (Array.isArray(parsed) && parsed.length > 0) setRaces(parsed);
-            }
-
-            const sUrl = localStorage.getItem('derby_supabase_url') || '';
-            const sKey = localStorage.getItem('derby_supabase_key') || '';
-            // 環境変数が優先。未設定のときだけ幹事画面で手入力した値を使う
-            if (!ENV_SUPABASE_URL && sUrl) setSupabaseUrl(sUrl);
-            if (!ENV_SUPABASE_KEY && sKey) setSupabaseKey(sKey);
         } catch (e) {
             console.warn("Storage load warning:", e);
         }
-    }, [role, isAuthority]);
+
+        // DB から最新状態を参照・反映
+        void loadInitialDataFromDB();
+
+        // 定期的に DB と整合性を同期（レース実行中以外）
+        const timer = window.setInterval(() => {
+            if (statusRef.current !== 'racing') {
+                void loadInitialDataFromDB();
+            }
+        }, 5000);
+
+        return () => window.clearInterval(timer);
+    }, [role, isAuthority, loadInitialDataFromDB]);
 
     // トースト自動消去
     useEffect(() => {
@@ -973,25 +1016,22 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         // 採点は幹事側（正の情報源）だけが行い、得点表を全画面に配信する。
         // 各端末で別々に採点すると端末ごとに得点がずれるため。
         if (isAuthority) {
-            if (source === 'local') broadcastGameState('result', raceIdx, order);
+            if (source === 'local') {
+                broadcastGameState('result', raceIdx, order);
+                // DB 側に結果を保存し、参加者全員の的中得点を合算更新
+                void fetch('/api/trifecta', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ type: 'finalize_race', raceIndex: raceIdx, correctOrder: order })
+                }).then(() => {
+                    sendEvent('refresh-data', {});
+                }).catch(err => console.error("Finalize DB error:", err));
+            }
             if (gained > 0) setParticipantScore(prev => prev + gained);
             setParticipants(prev => prev.map(p => ({
                 ...p,
                 score: p.score + calculateBetScore(p.betSlip, order)
             })));
-        }
-
-        // Supabase への記録（失敗してもゲームは続行）
-        const client = supabaseClientRef.current;
-        if (client && isCloudConnectedRef.current && myBet) {
-            client.from('derby_bets').insert([{
-                game_id: 'derby_current',
-                race_index: raceIdx,
-                participant_id: participantIdRef.current,
-                participant_name: participantNameRef.current,
-                bet_order: myBet,
-                score_gained: gained
-            }]).catch((err: unknown) => console.warn("DB bet record warning:", err));
         }
     }, [broadcastGameState, isAuthority, renders3D, sendEvent]);
 
@@ -1058,103 +1098,74 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }, [isAuthority, renders3D]);
 
     useEffect(() => {
-        if (!supabaseUrl || !supabaseKey) {
-            setIsCloudConnected(false);
-            return;
-        }
         let isCancelled = false;
-        let localClient: SupabaseClientLike | null = null;
-        let localChannel: RealtimeChannelLike | null = null;
-
-        const connectSupabase = async () => {
-            try {
-                if (typeof window === 'undefined') return;
-                let sb = getWin().supabase;
-                if (!sb) {
-                    await new Promise<void>((resolve) => {
-                        const script = document.createElement('script');
-                        script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2';
-                        script.onload = () => resolve();
-                        script.onerror = () => resolve();
-                        document.head.appendChild(script);
-                    });
-                    sb = getWin().supabase;
+        const ch = supabase.channel('derby-realtime-room')
+            .on('broadcast', { event: 'game-state-change' }, ({ payload }) => {
+                if (!payload) return;
+                applyRemoteGameState(payload as GameStatePayload);
+            })
+            .on('broadcast', { event: 'request-snapshot' }, () => {
+                // 後から開いた画面・リロードした画面へ現在の状態を送る
+                if (isAuthority) broadcastGameState(statusRef.current, raceIndexRef.current, correctOrderRef.current);
+            })
+            .on('broadcast', { event: 'race-finished' }, ({ payload }) => {
+                const msg = payload as { raceIndex?: number } | null;
+                if (!isAuthority || statusRef.current !== 'racing') return;
+                if (msg?.raceIndex !== undefined && msg.raceIndex !== raceIndexRef.current) return;
+                finalizeRaceRef.current('local');
+            })
+            .on('broadcast', { event: 'participant-join' }, ({ payload }) => {
+                if (!payload) return;
+                const join = payload as JoinPayload;
+                setParticipants(prev => {
+                    const idx = prev.findIndex(p => p.id === join.participantId);
+                    if (idx >= 0) {
+                        if (prev[idx].name === join.name) return prev;
+                        const updated = [...prev];
+                        updated[idx] = { ...updated[idx], name: join.name };
+                        return updated;
+                    }
+                    return [...prev, { id: join.participantId, name: join.name, score: 0, betSlip: null }];
+                });
+            })
+            .on('broadcast', { event: 'participant-bet' }, ({ payload }) => {
+                if (!payload) return;
+                const bet = payload as BetPayload;
+                if (bet.raceIndex !== undefined && bet.raceIndex !== raceIndexRef.current) return;
+                setParticipants(prev => {
+                    const idx = prev.findIndex(p => p.id === bet.participantId);
+                    if (idx >= 0) {
+                        const updated = [...prev];
+                        updated[idx] = { ...updated[idx], betSlip: bet.betOrder, name: bet.name };
+                        return updated;
+                    }
+                    return [...prev, { id: bet.participantId, name: bet.name, score: 0, betSlip: bet.betOrder }];
+                });
+            })
+            .on('broadcast', { event: 'refresh-data' }, () => {
+                void loadInitialDataFromDB();
+            })
+            .subscribe((st) => {
+                if (isCancelled) return;
+                const ok = st === 'SUBSCRIBED';
+                isCloudConnectedRef.current = ok;
+                setIsCloudConnected(ok);
+                if (ok && !isAuthority) {
+                    void ch.send({ type: 'broadcast', event: 'request-snapshot', payload: {} });
                 }
-                if (isCancelled || !sb) return;
+            });
 
-                const client = sb.createClient(supabaseUrl, supabaseKey);
-                localClient = client;
-                supabaseClientRef.current = client;
-
-                const ch = client.channel('derby-realtime-room')
-                    .on('broadcast', { event: 'game-state-change' }, ({ payload }) => {
-                        if (!payload) return;
-                        applyRemoteGameState(payload as GameStatePayload);
-                    })
-                    .on('broadcast', { event: 'request-snapshot' }, () => {
-                        // 後から開いた画面・リロードした画面へ現在の状態を送る
-                        if (isAuthority) broadcastGameState(statusRef.current, raceIndexRef.current, correctOrderRef.current);
-                    })
-                    .on('broadcast', { event: 'race-finished' }, ({ payload }) => {
-                        const msg = payload as { raceIndex?: number } | null;
-                        if (!isAuthority || statusRef.current !== 'racing') return;
-                        if (msg?.raceIndex !== undefined && msg.raceIndex !== raceIndexRef.current) return;
-                        finalizeRaceRef.current('local');
-                    })
-                    .on('broadcast', { event: 'participant-join' }, ({ payload }) => {
-                        if (!payload || !isAuthority) return;
-                        const join = payload as JoinPayload;
-                        setParticipants(prev => {
-                            const idx = prev.findIndex(p => p.id === join.participantId);
-                            if (idx >= 0) {
-                                if (prev[idx].name === join.name) return prev;
-                                const updated = [...prev];
-                                updated[idx] = { ...updated[idx], name: join.name };
-                                return updated;
-                            }
-                            return [...prev, { id: join.participantId, name: join.name, score: 0, betSlip: null }];
-                        });
-                    })
-                    .on('broadcast', { event: 'participant-bet' }, ({ payload }) => {
-                        if (!payload || !isAuthority) return;
-                        const bet = payload as BetPayload;
-                        if (bet.raceIndex !== undefined && bet.raceIndex !== raceIndexRef.current) return;
-                        setParticipants(prev => {
-                            const idx = prev.findIndex(p => p.id === bet.participantId);
-                            if (idx >= 0) {
-                                const updated = [...prev];
-                                updated[idx] = { ...updated[idx], betSlip: bet.betOrder, name: bet.name };
-                                return updated;
-                            }
-                            return [...prev, { id: bet.participantId, name: bet.name, score: 0, betSlip: bet.betOrder }];
-                        });
-                    })
-                    .subscribe((st) => {
-                        if (isCancelled) return;
-                        const ok = st === 'SUBSCRIBED';
-                        isCloudConnectedRef.current = ok;
-                        setIsCloudConnected(ok);
-                        if (ok && !isAuthority) {
-                            void ch.send({ type: 'broadcast', event: 'request-snapshot', payload: {} });
-                        }
-                    });
-
-                localChannel = ch;
-                channelRef.current = ch;
-            } catch (err) {
-                console.warn("Supabase connection warning:", err);
-            }
-        };
-
-        void connectSupabase();
+        channelRef.current = ch as unknown as RealtimeChannelLike;
 
         return () => {
             isCancelled = true;
-            if (localChannel && localClient) localClient.removeChannel(localChannel);
-            if (channelRef.current === localChannel) channelRef.current = null;
+            void supabase.removeChannel(ch);
+            if (channelRef.current === (ch as unknown as RealtimeChannelLike)) {
+                channelRef.current = null;
+            }
             setIsCloudConnected(false);
         };
-    }, [supabaseUrl, supabaseKey, applyRemoteGameState, isAuthority, broadcastGameState]);
+    }, [applyRemoteGameState, isAuthority, broadcastGameState, loadInitialDataFromDB]);
 
     // 幹事側：参加者・問題が変わったら全画面へ最新の得点表と問題を再配信（0.3秒まとめ）
     useEffect(() => {
@@ -1482,6 +1493,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         setGameStatus('racing');
         soundRef.current?.playFanfare();
         broadcastGameState('racing', currentRaceIndex, correctOrder);
+        // DB にレース発走状態を記録
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'update_game', status: 'racing', currentRaceIndex, correctOrder })
+        }).catch(err => console.error("Start race DB error:", err));
+
         // 保険：幹事タブが裏に回り、スクリーンからのゴール通知も届かない場合でも20秒で確定（通常は約13秒でゴール）
         const raceAtStart = currentRaceIndex;
         window.setTimeout(() => {
@@ -1501,11 +1519,20 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         setIssuedBetSlip(null);
         setSelectedChoices([]);
         setCorrectOrder(newOrder);
-        // 前レースの馬券は破棄（モックは新しい予想を自動投票）
-        setParticipants(prev => prev.map(p => ({ ...p, betSlip: p.isMock ? randomBet() : null })));
+        // 前レースの馬券は破棄
+        setParticipants(prev => prev.map(p => ({ ...p, betSlip: null })));
         resetHorsePositions();
-        if (broadcast) broadcastGameState('idle', idx, newOrder);
-    }, [races, resetHorsePositions, broadcastGameState]);
+        if (broadcast) {
+            broadcastGameState('idle', idx, newOrder);
+            void fetch('/api/trifecta', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: 'update_game', status: 'idle', currentRaceIndex: idx, correctOrder: newOrder })
+            }).then(() => {
+                sendEvent('refresh-data', {});
+            }).catch(err => console.error("Go to race DB error:", err));
+        }
+    }, [races, resetHorsePositions, broadcastGameState, sendEvent]);
 
     const advanceToNextRace = useCallback(() => {
         const isLast = currentRaceIndex >= races.length - 1;
@@ -1515,6 +1542,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             soundRef.current?.playFanfare();
             soundRef.current?.playCheers();
             broadcastGameState('grand_finale', currentRaceIndex, correctOrder);
+            void fetch('/api/trifecta', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ type: 'update_game', status: 'grand_finale' })
+            }).catch(err => console.error("Grand finale DB error:", err));
         } else {
             goToRace(currentRaceIndex + 1, true);
             soundRef.current?.playFanfare();
@@ -1528,7 +1560,15 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         setSelectedChoices([]);
         resetHorsePositions();
         broadcastGameState('idle', currentRaceIndex, correctOrder);
-    }, [currentRaceIndex, correctOrder, resetHorsePositions, broadcastGameState]);
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'rebet', raceIndex: currentRaceIndex })
+        }).then(() => {
+            void loadInitialDataFromDB();
+            sendEvent('refresh-data', {});
+        }).catch(err => console.error("Rebet DB error:", err));
+    }, [currentRaceIndex, correctOrder, resetHorsePositions, broadcastGameState, loadInitialDataFromDB, sendEvent]);
 
     const resetEntireTournament = useCallback(() => {
         const firstRace = races[0];
@@ -1539,11 +1579,19 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         setParticipantScore(0);
         setIssuedBetSlip(null);
         setSelectedChoices([]);
-        setParticipants(prev => prev.map(p => ({ ...p, score: 0, betSlip: p.isMock ? randomBet() : null })));
+        setParticipants(prev => prev.map(p => ({ ...p, score: 0, betSlip: null })));
         resetHorsePositions();
         setCorrectOrder(newOrder);
         broadcastGameState('idle', 0, newOrder);
-    }, [races, resetHorsePositions, broadcastGameState]);
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'reset_tournament' })
+        }).then(() => {
+            void loadInitialDataFromDB();
+            sendEvent('refresh-data', {});
+        }).catch(err => console.error("Reset DB error:", err));
+    }, [races, resetHorsePositions, broadcastGameState, loadInitialDataFromDB, sendEvent]);
 
     // 幹事：正解着順の変更（重複禁止）＋ races 側にも保持
     const updateCorrectOrder = useCallback((rank: number, val: number) => {
@@ -1589,6 +1637,20 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         setIssuedBetSlip(bet);
         soundRef.current?.playCheers();
         broadcastParticipantBet(bet);
+        // DB に投票を記録
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                type: 'bet',
+                participantId,
+                name: participantName,
+                betOrder: bet,
+                raceIndex: currentRaceIndex
+            })
+        }).then(() => {
+            sendEvent('refresh-data', {});
+        }).catch(err => console.error("Bet DB error:", err));
     };
 
     // 全参加者ランキング一覧（降順ソート）
@@ -1645,6 +1707,15 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         if (!name) return;
         setParticipantName(name);
         try { localStorage.setItem('derby_participant_name', name); } catch { /* noop */ }
+        // DB に参加者登録
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'join', participantId, name })
+        }).then(() => {
+            sendEvent('participant-join', { participantId, name });
+            sendEvent('refresh-data', {});
+        }).catch(err => console.error("Join DB error:", err));
     };
 
     // 進行中のゲームがあるときはホームへ戻る前に確認（得点は端末メモリにしかないため）
@@ -2284,13 +2355,19 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 ))}
                                             </div>
                                             <button
-                                                onClick={() => {
+                                                onClick={async () => {
                                                     try {
                                                         localStorage.setItem('derby_saved_races', JSON.stringify(races));
-                                                        setToastMessage('全レースの問題設定をローカルに保存しました');
+                                                        await fetch('/api/trifecta', {
+                                                            method: 'POST',
+                                                            headers: { 'Content-Type': 'application/json' },
+                                                            body: JSON.stringify({ type: 'save_races', races })
+                                                        });
+                                                        sendEvent('refresh-data', {});
+                                                        setToastMessage('全レースの問題設定をDBに保存しました');
                                                     } catch (e) {
                                                         console.warn(e);
-                                                        setToastMessage('保存に失敗しました（ブラウザのストレージ設定を確認してください）');
+                                                        setToastMessage('保存に失敗しました');
                                                     }
                                                 }}
                                                 className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs"
