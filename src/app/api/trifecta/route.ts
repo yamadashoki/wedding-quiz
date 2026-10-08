@@ -67,17 +67,33 @@ const DEFAULT_RACES: DerbyRaceInput[] = [
 ];
 
 // 得点計算ルール：
-// 3連単完全的中: +6pt
-// 3連複的中: +4pt
-// 2連単的中: +3pt
+// サンレンタン完全的中: +6pt
+// サンレンプク的中: +4pt
+// ニレンタン的中: +3pt
+// プクプク的中: +2pt (正解1着・2着を着順不問で含む)
+// タン的中: +1pt (1着的中)
 function calculateBetScore(bet: number[] | null, correct: number[]): number {
     if (!bet || bet.length < 3 || correct.length < 3) return 0;
+    // 1. サンレンタン (+6pt)
     if (bet[0] === correct[0] && bet[1] === correct[1] && bet[2] === correct[2]) return 6;
+
+    // 2. サンレンプク (+4pt)
     const betSet = new Set(bet.slice(0, 3));
     const correctSet = new Set(correct.slice(0, 3));
     const isFuku = betSet.size === 3 && correctSet.size === 3 && bet.slice(0, 3).every(x => correctSet.has(x));
     if (isFuku) return 4;
+
+    // 3. ニレンタン (+3pt)
     if (bet[0] === correct[0] && bet[1] === correct[1]) return 3;
+
+    // 4. プクプク (+2pt): 正解の1着・2着の2頭を着順不問で含む
+    const top2 = new Set([correct[0], correct[1]]);
+    const matchedTop2 = bet.slice(0, 3).filter(x => top2.has(x));
+    if (matchedTop2.length >= 2) return 2;
+
+    // 5. タン (+1pt): 1着的中
+    if (bet[0] === correct[0]) return 1;
+
     return 0;
 }
 

@@ -418,7 +418,7 @@ class SoundSynthesizer {
     }
 }
 
-function createSaddleTexture(letter: string, bgColor: string, textColor = "#ffffff"): THREE.CanvasTexture | null {
+function createSaddleTexture(letter: string, bgColor: string, textColor = "#000000"): THREE.CanvasTexture | null {
     if (typeof document === 'undefined') return null;
     const cv = document.createElement("canvas");
     cv.width = 128;
@@ -430,8 +430,9 @@ function createSaddleTexture(letter: string, bgColor: string, textColor = "#ffff
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 10;
     ctx.strokeRect(4, 4, 120, 120);
+    // 黒文字で大きく
     ctx.fillStyle = textColor;
-    ctx.font = "bold 84px sans-serif";
+    ctx.font = "bold 88px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(letter, 64, 66);
@@ -441,27 +442,28 @@ function createSaddleTexture(letter: string, bgColor: string, textColor = "#ffff
 function createLetterBadgeSprite(letter: string, bgColor: string): THREE.Object3D {
     if (typeof document === 'undefined') return new THREE.Group();
     const cv = document.createElement("canvas");
-    cv.width = 64;
-    cv.height = 64;
+    cv.width = 128;
+    cv.height = 128;
     const ctx = cv.getContext("2d");
     if (!ctx) return new THREE.Group();
     ctx.fillStyle = bgColor;
     ctx.beginPath();
-    ctx.arc(32, 32, 28, 0, Math.PI * 2);
+    ctx.arc(64, 64, 58, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 4;
+    ctx.lineWidth = 8;
     ctx.stroke();
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "900 36px monospace";
+    // 黒文字で大きく！
+    ctx.fillStyle = "#000000";
+    ctx.font = "900 80px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(letter, 32, 34);
+    ctx.fillText(letter, 64, 68);
 
     const tex = new THREE.CanvasTexture(cv);
     const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
     const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(1.5, 1.5, 1);
+    sprite.scale.set(3.2, 3.2, 1);
     return sprite;
 }
 
@@ -513,13 +515,16 @@ function generateStandWallTexture(): THREE.CanvasTexture | null {
 
 function buildLowPolyHorse(horseData: HorseData): HorseObject {
     const group = new THREE.Group();
+    // 遠くからでもはっきり見えるように馬のモデルを1.5倍に拡大
+    group.scale.set(1.5, 1.5, 1.5);
+
     const horseMat = new THREE.MeshLambertMaterial({ color: 0x854d24 });
     const darkMat = new THREE.MeshLambertMaterial({ color: 0x3a1f10 });
     const whiteMat = new THREE.MeshLambertMaterial({ color: 0xf8fafc });
     const jockeyMat = new THREE.MeshLambertMaterial({ color: horseData.jockeyColor });
 
     const saddleMat = new THREE.MeshLambertMaterial({
-        map: createSaddleTexture(horseData.letter, horseData.color, horseData.num === 1 ? "#000000" : "#ffffff")
+        map: createSaddleTexture(horseData.letter, horseData.color, "#000000")
     });
 
     const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.5, 3.2), horseMat);
@@ -555,7 +560,7 @@ function buildLowPolyHorse(horseData: HorseData): HorseObject {
 
     const backBadge = new THREE.Mesh(
         new THREE.PlaneGeometry(0.7, 0.7),
-        new THREE.MeshBasicMaterial({ map: createSaddleTexture(horseData.letter, "#000000", "#ffffff"), side: THREE.DoubleSide })
+        new THREE.MeshBasicMaterial({ map: createSaddleTexture(horseData.letter, "#ffffff", "#000000"), side: THREE.DoubleSide })
     );
     backBadge.position.set(0, 4.3, 0.05);
     backBadge.rotation.x = Math.PI / 3.5;
@@ -567,7 +572,7 @@ function buildLowPolyHorse(horseData: HorseData): HorseObject {
     group.add(helmet);
 
     const headBadge = createLetterBadgeSprite(horseData.letter, horseData.color);
-    headBadge.position.set(0, 6.2, -1.2);
+    headBadge.position.set(0, 6.4, -1.2);
     group.add(headBadge);
 
     const legGeo = new THREE.BoxGeometry(0.35, 2.0, 0.4);
@@ -639,23 +644,57 @@ function createTrackFence(xPos: number, trackLength: number): THREE.Group {
 }
 
 // ==============================================================
-// 得点計算（3d.html完全互換仕様）
-// 完全的中: +6pt, 順不同3頭的中: +4pt, 1着2着連勝: +3pt
+// 得点計算
+// サンレンタン+6pt, サンレンプク+4pt, ニレンタン+3pt, プクプク+2pt, タン+1pt
 // ==============================================================
-function calculateBetScore(bet: BetOrder | null | undefined, correct: BetOrder | null | undefined): number {
-    if (!bet || bet.length < 3 || !correct || correct.length < 3) return 0;
-    if (bet[0] === correct[0] && bet[1] === correct[1] && bet[2] === correct[2]) {
-        return 6; // 完全的中
+type BetRankResult = 'sanrentan' | 'sanrenpuku' | 'nirentan' | 'pukupuku' | 'tan' | 'none';
+
+interface BetDetail {
+    score: number;
+    type: BetRankResult;
+    badgeLabel: string;
+    description: string;
+}
+
+function getBetDetail(bet: BetOrder | null | undefined, correct: BetOrder | null | undefined): BetDetail {
+    if (!bet || bet.length < 3 || !correct || correct.length < 3) {
+        return { score: 0, type: 'none', badgeLabel: '未投票', description: '未投票でした' };
     }
+
+    // 1. サンレンタン (+6pt): 1〜3着の着順が完全一致
+    if (bet[0] === correct[0] && bet[1] === correct[1] && bet[2] === correct[2]) {
+        return { score: 6, type: 'sanrentan', badgeLabel: 'サンレンタン+6pt', description: '🎉 サンレンタン完全的中 (+6pt)' };
+    }
+
+    // 2. サンレンプク (+4pt): 1〜3着の3頭を着順不問で的中
     const sortedB = [...bet].sort((a, b) => a - b).join();
     const sortedC = [...correct].sort((a, b) => a - b).join();
     if (sortedB === sortedC) {
-        return 4; // 3頭的中・順不同（サンレンプク）
+        return { score: 4, type: 'sanrenpuku', badgeLabel: 'サンレンプク+4pt', description: '✨ サンレンプク的中 (+4pt)' };
     }
+
+    // 3. ニレンタン (+3pt): 1着・2着を着順通り的中
     if (bet[0] === correct[0] && bet[1] === correct[1]) {
-        return 3; // 1着・2着を順番通り的中（ニレンタン）
+        return { score: 3, type: 'nirentan', badgeLabel: 'ニレンタン+3pt', description: '🎯 ニレンタン的中 (+3pt)' };
     }
-    return 0;
+
+    // 4. プクプク (+2pt): 正解の1着・2着の2頭を着順不問で含む
+    const top2 = new Set([correct[0], correct[1]]);
+    const matchedTop2 = bet.slice(0, 3).filter(x => top2.has(x));
+    if (matchedTop2.length >= 2) {
+        return { score: 2, type: 'pukupuku', badgeLabel: 'プクプク+2pt', description: '💫 プクプク的中 (+2pt)' };
+    }
+
+    // 5. タン (+1pt): 1着が的中
+    if (bet[0] === correct[0]) {
+        return { score: 1, type: 'tan', badgeLabel: 'タン+1pt', description: '🏇 タン的中 (+1pt)' };
+    }
+
+    return { score: 0, type: 'none', badgeLabel: '不的中', description: '不的中でした' };
+}
+
+function calculateBetScore(bet: BetOrder | null | undefined, correct: BetOrder | null | undefined): number {
+    return getBetDetail(bet, correct).score;
 }
 
 // モック参加者用のランダム3連単（重複なし）
@@ -710,6 +749,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
     // カメラ（残り距離・実況は React State にせず ref で DOM 直接更新する）
     const [cameraMode, setCameraMode] = useState<CameraMode>('follow');
+    // レース中のリアルタイム順位（並び替え演出用）
+    const [realtimeRanks, setRealtimeRanks] = useState<number[]>([0, 1, 2, 3, 4, 5, 6, 7]);
 
     // 参加者状態
     const [participantId, setParticipantId] = useState('guest_temp');
@@ -731,6 +772,21 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         { id: "g4", name: "受付・まい", score: 0, betSlip: [4, 6, 2], isMock: true },
         { id: "g5", name: "新婦親友・さくら", score: 0, betSlip: [6, 0, 4], isMock: true }
     ]);
+
+    // 各馬への投票数集計（単勝オッズに代わり投票数を表示）
+    const horseVoteCounts = useMemo(() => {
+        const counts = new Array(8).fill(0);
+        participants.forEach(p => {
+            if (p.betSlip && Array.isArray(p.betSlip)) {
+                p.betSlip.forEach((hIdx: number) => {
+                    if (typeof hIdx === 'number' && hIdx >= 0 && hIdx < 8) {
+                        counts[hIdx]++;
+                    }
+                });
+            }
+        });
+        return counts;
+    }, [participants]);
 
     // Supabase設定
     const [supabaseUrl, setSupabaseUrl] = useState(ENV_SUPABASE_URL);
@@ -1204,7 +1260,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         // 参加者スマホでは3Dもレース計算も動かさない（電池・発熱・音の重複を避ける）
         if (!isMounted || !runsSimulation) return;
 
-        const trackWidth = 32;
+        const trackWidth = 44;
         const trackLength = 1200;
 
         const scene = new THREE.Scene();
@@ -1282,11 +1338,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             scene.add(board, pole);
         });
 
-        // 8頭配置
+        // 8頭配置（コース拡大に合わせて配置幅も調整）
         const meshes: HorseObject[] = [];
         HORSES_DATA.forEach((hData, i) => {
             const hObj = buildLowPolyHorse(hData);
-            const laneX = -9 + (i * 2.5);
+            const laneX = -13 + (i * 3.7);
             hObj.baseLaneX = laneX;
             hObj.currentLaneX = laneX;
             hObj.targetLaneX = laneX;
@@ -1309,6 +1365,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         const camTarget = new THREE.Vector3();
         const badgeWorldPos = new THREE.Vector3();
         let gallopTimer = 0;
+        let rankUpdateTimer = 0;
         let frameId = 0;
 
         const renderLoop = () => {
@@ -1361,8 +1418,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         else h.currentSpeed = 0.98;
                     }
 
-                    h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 3.5);
-                    h.progressZ -= h.currentSpeed * 34 * dt;
+                    h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 2.0);
+                    // レース時間を2倍に（速度を34から17へ半減）
+                    h.progressZ -= h.currentSpeed * 17 * dt;
                     if (h.progressZ <= FINISH_Z) {
                         h.progressZ = FINISH_Z;
                         h.finished = true;
@@ -1386,9 +1444,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 // メッシュへ反映
                 h.mesh.position.x = h.currentLaneX;
                 h.mesh.position.z = h.progressZ;
-                h.mesh.position.y = isRacing && !h.finished ? Math.abs(Math.sin(time * 18 * h.currentSpeed)) * 0.28 : 0;
+                h.mesh.position.y = isRacing && !h.finished ? Math.abs(Math.sin(time * 10 * h.currentSpeed)) * 0.35 : 0;
 
-                const legSpeed = isRacing && !h.finished ? 17 * h.currentSpeed : 6;
+                const legSpeed = isRacing && !h.finished ? 10 * h.currentSpeed : 4;
                 const swing = Math.sin(time * legSpeed + idx);
                 h.legs.legFL.rotation.x = swing * 0.75;
                 h.legs.legBR.rotation.x = swing * 0.75;
@@ -1400,7 +1458,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 // ゼッケン(A〜H)の丸バッジは常に最前面に描画されるため、
                 // カメラの真横を通過する馬のバッジが画面を覆わないよう近距離では隠す
                 h.badge.getWorldPosition(badgeWorldPos);
-                h.badge.visible = camera.position.distanceTo(badgeWorldPos) > 12;
+                h.badge.visible = camera.position.distanceTo(badgeWorldPos) > 14;
 
                 if (h.progressZ < leadHorse.progressZ) {
                     leadHorse = h;
@@ -1409,28 +1467,25 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
             if (isRacing) {
                 gallopTimer += delta;
-                if (renders3D && gallopTimer > 0.18 && soundRef.current) {
+                if (renders3D && gallopTimer > 0.32 && soundRef.current) {
                     soundRef.current.playGallop();
                     gallopTimer = 0;
                 }
 
-                // 残り距離・実況は値が変わった時だけ DOM を直接書き換える（setState しない）
+                // リアルタイム順位並び替え（約0.18秒おきに各馬の進行度から順位を算出して反映）
+                rankUpdateTimer += delta;
+                if (rankUpdateTimer >= 0.18) {
+                    rankUpdateTimer = 0;
+                    const sorted = meshes
+                        .map((m, mIdx) => ({ idx: mIdx, z: m.progressZ }))
+                        .sort((a, b) => a.z - b.z)
+                        .map(item => item.idx);
+                    setRealtimeRanks(sorted);
+                }
+
+                // 残り距離
                 const remain = Math.min(400, Math.max(0, Math.floor(leadHorse.progressZ - FINISH_Z)));
                 writeRemain(remain);
-
-                const winner = HORSES_DATA[winnerIdx] ?? HORSES_DATA[0];
-                const second = HORSES_DATA[secondIdx] ?? HORSES_DATA[1];
-                if (remain > 270) {
-                    writeCommentary(`序盤リードを奪ったのは [${leadHorse.data.letter}]！快調に飛ばしていく！`);
-                } else if (remain > 160) {
-                    writeCommentary(`残り200m標識！後続集団が一気に差を詰めてきた！馬群が密集する！！`);
-                } else if (remain > 60) {
-                    writeCommentary(`大外から凄まじい手応え！[${winner.letter}] が一気にごぼう抜き！飛び出してきたーっ！！`);
-                } else if (remain > 10) {
-                    writeCommentary(`[${winner.letter}] が完全に抜け出した！内から [${second.letter}] が食い下がるが届くか！？`);
-                } else {
-                    writeCommentary(`[${winner.letter}] 堂々の先頭ゴールイン！！大外一気の見事な差し切り勝ち！！`);
-                }
 
                 // 全頭ゴール → 1回だけ確定処理（statusRef も即時更新して次フレームで再発火しない）
                 if (!hasFinishedRef.current && meshes.every(m => m.finished)) {
@@ -1441,21 +1496,21 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
             // カメラ制御（Vector3 を毎フレーム new しない）
             const targetPos = leadHorse.mesh.position;
-            // lerp係数をフレームレート非依存に（60fps時の0.08相当）。低fpsでもカメラが置いていかれない
+            // lerp係数をフレームレート非依存に
             const camLerp = 1 - Math.pow(1 - 0.08, delta * 60);
             if (currentCam === 'follow') {
-                camera.position.lerp(camTarget.set(targetPos.x + 10, targetPos.y + 7.5, targetPos.z + 24), camLerp);
+                camera.position.lerp(camTarget.set(targetPos.x + 14, targetPos.y + 11, targetPos.z + 32), camLerp);
                 camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z - 10);
             } else if (currentCam === 'side') {
-                camera.position.lerp(camTarget.set(targetPos.x + 24, targetPos.y + 4.5, targetPos.z - 2), camLerp);
+                camera.position.lerp(camTarget.set(targetPos.x + 32, targetPos.y + 6, targetPos.z - 2), camLerp);
                 camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
             } else if (currentCam === 'front') {
-                camera.position.lerp(camTarget.set(targetPos.x, targetPos.y + 3.5, targetPos.z - 24), camLerp);
+                camera.position.lerp(camTarget.set(targetPos.x, targetPos.y + 5, targetPos.z - 32), camLerp);
                 camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
             } else {
-                // 俯瞰：右斜め前の角度で上から見下ろし、全頭を1画面で追えるようにする
-                camera.position.lerp(camTarget.set(targetPos.x + 22, 25, targetPos.z - 28), camLerp);
-                camera.lookAt(targetPos.x - 2, 2, targetPos.z + 4);
+                // 俯瞰：上空からコース全体と全8頭を見下ろし、大迫力で全体が綺麗に収まる画角
+                camera.position.lerp(camTarget.set(0, 52, targetPos.z - 44), camLerp);
+                camera.lookAt(0, 0, targetPos.z + 12);
             }
 
             // スクリーン枠が表示されている時だけ描画（非表示中もレース進行は継続）
@@ -1511,13 +1566,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             body: JSON.stringify({ type: 'update_game', status: 'racing', currentRaceIndex, correctOrder })
         }).catch(err => console.error("Start race DB error:", err));
 
-        // 保険：幹事タブが裏に回り、スクリーンからのゴール通知も届かない場合でも20秒で確定（通常は約13秒でゴール）
+        // 保険：幹事タブが裏に回り、スクリーンからのゴール通知も届かない場合でも45秒で確定（通常は約26秒でゴール）
         const raceAtStart = currentRaceIndex;
         window.setTimeout(() => {
             if (statusRef.current === 'racing' && raceIndexRef.current === raceAtStart) {
                 finalizeRaceRef.current('local');
             }
-        }, 20000);
+        }, 45000);
     }, [currentRaceIndex, correctOrder, resetHorsePositions, broadcastGameState]);
 
     const goToRace = useCallback((idx: number, broadcast: boolean) => {
@@ -1529,6 +1584,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         statusRef.current = 'idle';
         setIssuedBetSlip(null);
         setSelectedChoices([]);
+        setRealtimeRanks([0, 1, 2, 3, 4, 5, 6, 7]);
         setCorrectOrder(newOrder);
         correctOrderRef.current = newOrder;
         // 前レースの馬券は破棄
@@ -1546,24 +1602,76 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }
     }, [races, resetHorsePositions, broadcastGameState, sendEvent]);
 
-    const advanceToNextRace = useCallback(() => {
-        const isLast = currentRaceIndex >= races.length - 1;
-        if (isLast) {
-            setGameStatus('grand_finale');
-            statusRef.current = 'grand_finale';
-            soundRef.current?.playFanfare();
-            soundRef.current?.playCheers();
-            broadcastGameState('grand_finale', currentRaceIndex, correctOrder);
-            void fetch('/api/trifecta', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type: 'update_game', status: 'grand_finale' })
-            }).catch(err => console.error("Grand finale DB error:", err));
-        } else {
+    // 新規レース追加（その都度レースを設定可能、得点は累積合算）
+    const addNewRace = useCallback(() => {
+        const newRound = races.length;
+        const newRace: DerbyRace = {
+            id: `race_${newRound + 1}_${Date.now()}`,
+            roundIndex: newRound,
+            name: `第${newRound + 1}R：特別レース`,
+            question: `第${newRound + 1}レースのお題を入力してください`,
+            options: [
+                "選択肢 A", "選択肢 B", "選択肢 C", "選択肢 D",
+                "選択肢 E", "選択肢 F", "選択肢 G", "選択肢 H"
+            ],
+            correctOrder: [0, 1, 2]
+        };
+        const updated = [...races, newRace];
+        setRaces(updated);
+        setCurrentRaceIndex(newRound);
+        try {
+            localStorage.setItem('derby_saved_races', JSON.stringify(updated));
+        } catch (e) {
+            console.warn(e);
+        }
+        setToastMessage(`第${newRound + 1}Rを追加しました。「編集内容を保存」でDBに保存してください`);
+    }, [races]);
+
+    const deleteCurrentRace = useCallback(() => {
+        if (races.length <= 1) {
+            setToastMessage('これ以上レースを削除できません（最低1レース必要です）');
+            return;
+        }
+        const updated = races.filter((_, idx) => idx !== currentRaceIndex);
+        setRaces(updated);
+        const nextIdx = Math.max(0, currentRaceIndex - 1);
+        setCurrentRaceIndex(nextIdx);
+        try {
+            localStorage.setItem('derby_saved_races', JSON.stringify(updated));
+        } catch (e) {
+            console.warn(e);
+        }
+        setToastMessage('レースを削除しました。「編集内容を保存」でDBに保存してください');
+    }, [races, currentRaceIndex]);
+
+    const goToNextRace = useCallback(() => {
+        if (currentRaceIndex < races.length - 1) {
             goToRace(currentRaceIndex + 1, true);
             soundRef.current?.playFanfare();
+        } else {
+            // 次のレースがない場合は新レースを追加して待機画面へ遷移
+            addNewRace();
+            setGameStatus('idle');
+            statusRef.current = 'idle';
+            resetHorsePositions();
+            broadcastGameState('idle', races.length, [0, 1, 2]);
+            soundRef.current?.playFanfare();
+            setToastMessage(`第${races.length + 1}Rを追加し、発走前待機画面へ進みました`);
         }
-    }, [currentRaceIndex, races.length, correctOrder, goToRace, broadcastGameState]);
+    }, [currentRaceIndex, races.length, goToRace, addNewRace, resetHorsePositions, broadcastGameState]);
+
+    const goToGrandFinale = useCallback(() => {
+        setGameStatus('grand_finale');
+        statusRef.current = 'grand_finale';
+        soundRef.current?.playFanfare();
+        soundRef.current?.playCheers();
+        broadcastGameState('grand_finale', currentRaceIndex, correctOrder);
+        void fetch('/api/trifecta', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: 'update_game', status: 'grand_finale' })
+        }).catch(err => console.error("Grand finale DB error:", err));
+    }, [currentRaceIndex, correctOrder, broadcastGameState]);
 
     const rebetCurrentRace = useCallback(() => {
         setGameStatus('idle');
@@ -1677,6 +1785,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             return { ...r, options };
         }));
     }, [currentRaceIndex]);
+
 
     const toggleSound = () => {
         const next = !isMuted;
@@ -1828,9 +1937,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                             <span className="text-base">🏇</span>
                             <div>
                                 <div className="font-bold text-xs tracking-wider text-slate-100 flex items-center gap-1.5 font-mono">
-                                    <span className="font-black text-amber-400">3連単アンケートゲーム</span>
+                                    <span className="font-black text-amber-400">ウェディングサンレンタン！</span>
                                     <span className="bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] px-2 py-0.5 rounded font-mono">
-                                        第{currentRaceIndex + 1}R / 全3R
+                                        第{currentRaceIndex + 1}R / 全{races.length}R
                                     </span>
                                 </div>
                                 <div className="text-[10px] text-slate-400 hidden md:block">披露宴・二次会 リアルタイム連動システム</div>
@@ -1918,7 +2027,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                         {role === 'play' && !participantName ? (
                                             <div className="bg-slate-900 border border-amber-500/40 p-4 rounded-xl space-y-3 mt-6">
                                                 <div className="text-2xl text-center">🏇</div>
-                                                <div className="text-sm font-black text-white text-center">3連単アンケートゲームに参加</div>
+                                                <div className="text-sm font-black text-white text-center">ウェディングサンレンタン！に参加</div>
                                                 <p className="text-xs text-slate-400 text-center">ランキングに表示する名前を入力してください</p>
                                                 <input
                                                     type="text"
@@ -1974,15 +2083,16 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                     <span className="text-[10px] text-slate-400 font-bold block">第{currentRaceIndex + 1}R 判定結果</span>
                                                     {issuedBetSlip ? (
                                                         (() => {
-                                                            const pts = calculateBetScore(issuedBetSlip, correctOrder);
-                                                            let tag = "不的中";
+                                                            const detail = getBetDetail(issuedBetSlip, correctOrder);
                                                             let color = "bg-slate-800 text-slate-400";
-                                                            if (pts === 6) { tag = "🎉 サンレンタン完全的中 (+6pt)"; color = "bg-amber-500 text-slate-950 font-black"; }
-                                                            else if (pts === 4) { tag = "✨ サンレンプク的中 (+4pt)"; color = "bg-emerald-500 text-slate-950 font-black"; }
-                                                            else if (pts === 3) { tag = "🎯 ニレンタン的中 (+3pt)"; color = "bg-blue-500 text-white font-black"; }
+                                                            if (detail.type === 'sanrentan') color = "bg-amber-500 text-slate-950 font-black";
+                                                            else if (detail.type === 'sanrenpuku') color = "bg-emerald-500 text-slate-950 font-black";
+                                                            else if (detail.type === 'nirentan') color = "bg-blue-500 text-white font-black";
+                                                            else if (detail.type === 'pukupuku') color = "bg-purple-500 text-white font-black";
+                                                            else if (detail.type === 'tan') color = "bg-teal-500 text-white font-black";
                                                             return (
-                                                                <div className={`p-2 rounded-lg text-xs ${color}`}>
-                                                                    {tag}
+                                                                <div className={`p-2.5 rounded-lg text-xs font-bold ${color}`}>
+                                                                    {detail.description}
                                                                 </div>
                                                             );
                                                         })()
@@ -1993,13 +2103,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             )}
 
-                                            {/* 総合表彰式中のスマホ案内 */}
+                                            {/* 結果発表中のスマホ案内 */}
                                             {gameStatus === 'grand_finale' && (
                                                 <div className="bg-slate-900 border border-amber-500/40 p-5 rounded-2xl text-center space-y-3 shadow-xl">
                                                     <div className="text-3xl animate-bounce">🏆</div>
-                                                    <div className="text-base font-black text-amber-300">総合表彰式 開催中！</div>
+                                                    <div className="text-base font-black text-amber-300">結果発表中！</div>
                                                     <p className="text-xs text-slate-300">
-                                                        全3レース終了！会場メインスクリーンで最終表彰式が行われています！
+                                                        全レース終了！会場メインスクリーンで結果発表が行われています！
                                                     </p>
                                                     <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
                                                         <span className="text-xs text-slate-400 font-bold">あなたの最終スコア</span>
@@ -2117,54 +2227,84 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                         </button>
                                     )}
 
-                                    {/* オッズ板 ＆ カメラ切り替え */}
-                                    <div className="absolute top-0 inset-x-0 p-3 z-20 flex items-start justify-between pointer-events-none">
-                                        <div className="bg-slate-950/85 backdrop-blur border border-slate-800 rounded-xl p-2.5 shadow-lg text-xs w-48 font-mono pointer-events-auto">
-                                            <div className="text-[10px] font-bold text-slate-400 border-b border-slate-800 pb-1 mb-1.5 flex justify-between">
-                                                <span>{currentRace.name}</span>
-                                                <span>単勝</span>
+                                    {/* スクリーン上部オーバーレイ（左：残り距離 ＆ リアルタイム順位・投票数ボード、右：カメラ切替） */}
+                                    <div className="absolute top-0 inset-x-0 p-3 sm:p-4 z-20 flex items-start justify-between pointer-events-none">
+                                        {/* 左上：残り距離 ＆ 選択肢ボード */}
+                                        <div className="flex flex-col gap-2 pointer-events-auto">
+                                            {/* 残り距離メーター（左上に設置） */}
+                                            <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-xl px-4 py-2 flex items-center justify-between shadow-xl font-mono w-64 sm:w-80">
+                                                <span className="text-xs sm:text-sm text-slate-300 font-bold">残り距離</span>
+                                                <div className="flex items-baseline gap-1">
+                                                    <span ref={remainCallbackRef} className="text-2xl sm:text-3xl text-amber-300 font-black tabular-nums">400</span>
+                                                    <span className="text-xs sm:text-sm text-slate-400 font-bold">m</span>
+                                                </div>
                                             </div>
-                                            <div className="space-y-1">
-                                                {HORSES_DATA.map((h, i) => (
-                                                    <div key={h.letter} className="flex items-center justify-between text-[11px] font-bold px-1 py-0.5 rounded bg-black/40">
-                                                        <div className="flex items-center gap-1 truncate">
-                                                            <span className="w-4 h-4 rounded text-[9px] font-black flex items-center justify-center text-white" style={{ backgroundColor: h.color }}>
-                                                                {h.letter}
-                                                            </span>
-                                                            <span className="text-white truncate max-w-[100px]">{currentRace.options[i] || h.name}</span>
-                                                        </div>
-                                                        <span className="text-amber-300 font-mono">{horseOddsList[i]}</span>
-                                                    </div>
-                                                ))}
+
+                                            {/* 拡大された選択肢 ＆ リアルタイム順位変動ボード */}
+                                            <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-2xl p-3 shadow-2xl w-64 sm:w-80 font-mono">
+                                                <div className="text-xs sm:text-sm font-black text-amber-300 border-b border-slate-800 pb-2 mb-2 flex justify-between items-center">
+                                                    <span className="truncate max-w-[170px] sm:max-w-[200px]">{currentRace.name}</span>
+                                                    <span className="text-[11px] text-slate-400 font-bold">{gameStatus === 'racing' ? 'リアルタイム順位' : '投票数'}</span>
+                                                </div>
+                                                <div className="space-y-1.5">
+                                                    {(() => {
+                                                        const displayOrder = (gameStatus === 'racing' && realtimeRanks.length === 8)
+                                                            ? realtimeRanks
+                                                            : [0, 1, 2, 3, 4, 5, 6, 7];
+
+                                                        return displayOrder.map((hIdx, rankIdx) => {
+                                                            const h = HORSES_DATA[hIdx];
+                                                            const isRacing = gameStatus === 'racing';
+                                                            return (
+                                                                <div
+                                                                    key={h.letter}
+                                                                    className="flex items-center justify-between text-xs font-bold px-2 py-1.5 rounded-xl bg-black/60 border border-slate-800/80 shadow-sm transition-all duration-300"
+                                                                >
+                                                                    <div className="flex items-center gap-2 truncate flex-1 min-w-0">
+                                                                        {isRacing && (
+                                                                            <span className={`w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center shrink-0 ${
+                                                                                rankIdx === 0 ? 'bg-amber-400 text-slate-950 shadow' :
+                                                                                rankIdx === 1 ? 'bg-slate-200 text-slate-950' :
+                                                                                rankIdx === 2 ? 'bg-amber-700 text-white' :
+                                                                                'bg-slate-800 text-slate-300'
+                                                                            }`}>
+                                                                                {rankIdx + 1}
+                                                                            </span>
+                                                                        )}
+                                                                        <span
+                                                                            className="w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center text-black shrink-0 shadow-sm"
+                                                                            style={{ backgroundColor: h.color }}
+                                                                        >
+                                                                            {h.letter}
+                                                                        </span>
+                                                                        <span className="text-white text-xs sm:text-sm font-black truncate">
+                                                                            {currentRace.options[hIdx] || h.name}
+                                                                        </span>
+                                                                    </div>
+                                                                    <span className="text-amber-300 font-mono text-xs sm:text-sm font-black shrink-0 ml-2">
+                                                                        {horseVoteCounts[hIdx]}票
+                                                                    </span>
+                                                                </div>
+                                                            );
+                                                        });
+                                                    })()}
+                                                </div>
                                             </div>
                                         </div>
 
+                                        {/* 右上：カメラアングル切り替えボタン */}
                                         <div className="flex flex-col items-end gap-2 pointer-events-auto">
-                                            <div className="flex gap-1 bg-slate-950/85 backdrop-blur p-1 rounded-lg border border-slate-800 shadow">
+                                            <div className="flex gap-1 bg-slate-950/85 backdrop-blur p-1 rounded-xl border border-slate-800 shadow">
                                                 {(['follow', 'side', 'front', 'top'] as CameraMode[]).map(m => (
                                                     <button
                                                         key={m}
                                                         onClick={() => setCameraMode(m)}
-                                                        className={`px-2 py-0.5 text-[10px] font-bold rounded ${cameraMode === m ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
+                                                        className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${cameraMode === m ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
                                                     >
                                                         {m === 'follow' ? '追走' : m === 'side' ? 'サイド' : m === 'front' ? '正面' : '俯瞰'}
                                                     </button>
                                                 ))}
                                             </div>
-
-                                            <div className="bg-slate-950/90 border border-slate-800 px-3 py-1 rounded-lg flex items-center gap-2 shadow font-mono">
-                                                <span className="text-[10px] text-slate-300 font-bold">残り</span>
-                                                <span ref={remainCallbackRef} className="text-base text-amber-300 font-black tabular-nums" />
-                                                <span className="text-xs text-slate-400">m</span>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    {/* 下部実況字幕 */}
-                                    <div className="absolute bottom-3 inset-x-3 z-20 pointer-events-none flex justify-center">
-                                        <div className="w-full max-w-xl bg-slate-950/90 backdrop-blur border border-slate-800 px-4 py-2 rounded-xl shadow-xl flex items-center gap-2.5 text-xs">
-                                            <span className="bg-slate-800 text-amber-300 text-[10px] font-bold px-2 py-0.5 rounded shrink-0">実況</span>
-                                            <span ref={commentaryCallbackRef} className="text-white tracking-wide truncate" />
                                         </div>
                                     </div>
 
@@ -2247,11 +2387,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                 </div>
                                                             </div>
 
-                                                            {/* 単勝オッズ */}
+                                                            {/* 投票数 */}
                                                             <div className="mt-2 pt-2 border-t border-slate-800/80 w-full flex items-center justify-center gap-1.5 font-mono">
-                                                                <span className="text-[10px] sm:text-xs text-slate-400">確定単勝</span>
+                                                                <span className="text-[10px] sm:text-xs text-slate-400">投票数</span>
                                                                 <span className={`text-base sm:text-xl font-black ${cardStyles.accent}`}>
-                                                                    {horseOddsList[hIdx]}倍
+                                                                    {horseVoteCounts[hIdx]}票
                                                                 </span>
                                                             </div>
                                                         </div>
@@ -2267,6 +2407,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                     const perfectHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 6);
                                                     const trifectaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 4);
                                                     const exactaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 3);
+                                                    const quinellaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 2);
+                                                    const singleHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 1);
 
                                                     return (
                                                         <div className="bg-slate-900/90 border border-slate-800 rounded-xl sm:rounded-2xl p-3 sm:p-4 text-left shadow-lg">
@@ -2276,10 +2418,12 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                     <span className="font-black text-xs sm:text-sm text-white">このレースの的中者速報</span>
                                                                     <span className="text-xs text-amber-400 font-bold font-mono">({hits.length}名 的中)</span>
                                                                 </div>
-                                                                <div className="flex items-center gap-3 text-[10px] sm:text-xs text-slate-400 font-medium">
-                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400"></span>3連単 +6pt</span>
-                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400"></span>3連複 +4pt</span>
-                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-400"></span>2連単 +3pt</span>
+                                                                <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-[10px] sm:text-xs text-slate-300 font-bold">
+                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>サンレンタン +6pt</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>サンレンプク +4pt</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-blue-400"></span>ニレンタン +3pt</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-purple-400"></span>プクプク +2pt</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-pink-400"></span>タン +1pt</span>
                                                                 </div>
                                                             </div>
 
@@ -2288,26 +2432,40 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                     該当者なし！波乱のレース展開となりました⚡️
                                                                 </div>
                                                             ) : (
-                                                                <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto">
+                                                                <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
                                                                     {perfectHits.map(p => (
                                                                         <span key={p.id} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-black shadow-sm">
-                                                                            <span>👑 3連単!</span>
+                                                                            <span>👑 サンレンタン!</span>
                                                                             <span>{p.name}</span>
                                                                             <span className="font-mono text-[10px] bg-amber-500 text-slate-950 px-1.5 py-0.5 rounded font-black">+6pt</span>
                                                                         </span>
                                                                     ))}
                                                                     {trifectaHits.map(p => (
                                                                         <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-bold shadow-sm">
-                                                                            <span>✨ 3連複!</span>
+                                                                            <span>✨ サンレンプク!</span>
                                                                             <span>{p.name}</span>
                                                                             <span className="font-mono text-[10px] bg-emerald-500 text-slate-950 px-1.5 py-0.5 rounded font-black">+4pt</span>
                                                                         </span>
                                                                     ))}
                                                                     {exactaHits.map(p => (
                                                                         <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-300 text-xs font-bold shadow-sm">
-                                                                            <span>🎯 2連単!</span>
+                                                                            <span>🎯 ニレンタン!</span>
                                                                             <span>{p.name}</span>
                                                                             <span className="font-mono text-[10px] bg-blue-500 text-white px-1.5 py-0.5 rounded font-black">+3pt</span>
+                                                                        </span>
+                                                                    ))}
+                                                                    {quinellaHits.map(p => (
+                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-purple-500/20 border border-purple-500/40 text-purple-300 text-xs font-bold shadow-sm">
+                                                                            <span>🍀 プクプク!</span>
+                                                                            <span>{p.name}</span>
+                                                                            <span className="font-mono text-[10px] bg-purple-500 text-white px-1.5 py-0.5 rounded font-black">+2pt</span>
+                                                                        </span>
+                                                                    ))}
+                                                                    {singleHits.map(p => (
+                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-pink-500/20 border border-pink-500/40 text-pink-300 text-xs font-bold shadow-sm">
+                                                                            <span>⚡️ タン!</span>
+                                                                            <span>{p.name}</span>
+                                                                            <span className="font-mono text-[10px] bg-pink-500 text-white px-1.5 py-0.5 rounded font-black">+1pt</span>
                                                                         </span>
                                                                     ))}
                                                                 </div>
@@ -2316,141 +2474,123 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                     );
                                                 })()}
 
-                                                {/* 進行ボタン */}
+                                                {/* 進行ボタン（次レースへいく ＆ 表彰式へいく） */}
                                                 {isAuthority ? (
-                                                    <button
-                                                        onClick={advanceToNextRace}
-                                                        className="w-full py-3 sm:py-3.5 bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-sm sm:text-base rounded-xl sm:rounded-2xl shadow-xl transition-all transform hover:scale-[1.01]"
-                                                    >
-                                                        {currentRaceIndex >= races.length - 1 ? '🏆 全3レース終了！栄光の総合表彰へ ➔' : `次のレース（第${currentRaceIndex + 2}R）へ進む ➔`}
-                                                    </button>
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                                                        <button
+                                                            onClick={goToNextRace}
+                                                            className="py-3 sm:py-3.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-sm sm:text-base rounded-xl sm:rounded-2xl shadow-xl transition-all transform hover:scale-[1.01]"
+                                                        >
+                                                            🏇 次レースへいく（待機へ） ➔
+                                                        </button>
+                                                        <button
+                                                            onClick={goToGrandFinale}
+                                                            className="py-3 sm:py-3.5 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-sm sm:text-base rounded-xl sm:rounded-2xl shadow-xl transition-all transform hover:scale-[1.01]"
+                                                        >
+                                                            🏆 表彰式（結果発表）へいく ➔
+                                                        </button>
+                                                    </div>
                                                 ) : (
                                                     <div className="py-2 text-xs sm:text-sm text-slate-400 font-medium">
-                                                        幹事が次のレースへ進めるまでお待ちください
+                                                        幹事が次の進行を選択するまでお待ちください
                                                     </div>
                                                 )}
                                             </div>
                                         </div>
                                     )}
 
-                                    {/* 総合優勝・グランドフィナーレ（画面いっぱい表彰式ステージ） */}
+                                    {/* 結果発表（画面いっぱいフルスクリーン） */}
                                     {gameStatus === 'grand_finale' && (
                                         <div className="absolute inset-0 z-50 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 backdrop-blur-xl flex flex-col justify-between p-4 sm:p-6 lg:p-10 text-center animate-fade-in overflow-y-auto">
                                             {/* 上部タイトル */}
-                                            <div className="shrink-0 space-y-1 sm:space-y-2">
-                                                <div className="inline-flex items-center gap-2 px-4 sm:px-6 py-1 sm:py-1.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-amber-300 font-black text-xs sm:text-sm tracking-widest shadow-xl">
-                                                    <span>🏆</span>
-                                                    <span>GRAND FINALE CEREMONY</span>
-                                                    <span>🏆</span>
-                                                </div>
-                                                <h1 className="text-2xl sm:text-3xl lg:text-5xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wide drop-shadow">
-                                                    3連単アンケートゲーム 総合表彰式
+                                            <div className="shrink-0 space-y-2">
+                                                <h1 className="text-3xl sm:text-4xl lg:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wider drop-shadow">
+                                                    結果発表
                                                 </h1>
-                                                <p className="text-xs sm:text-sm lg:text-base text-slate-300 font-medium">
-                                                    全3レースを制した、栄光の「3連単マスター」は誰の手に！？
-                                                </p>
                                             </div>
 
-                                            {/* 中央 表彰台ポディウム（1位・2位・3位） */}
+                                            {/* 中央 表彰台（1位・2位・3位）：要素は順位、名前、ポイントのみ */}
                                             <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
                                                 <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6 items-end">
-                                                    {/* 🥈 2位 (準優勝) - 左 */}
+                                                    {/* 2位 - 左 */}
                                                     {(() => {
                                                         const runnerUp = allRankedParticipants[1];
                                                         return (
-                                                            <div className="order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-2 border-slate-300/80 rounded-2xl sm:rounded-3xl p-5 sm:p-6 flex flex-col items-center shadow-xl relative md:h-[340px] justify-between">
-                                                                <div className="w-10 h-10 rounded-full bg-slate-300 text-slate-900 flex items-center justify-center font-black text-lg shadow">
-                                                                    2
+                                                            <div className="order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-2 border-slate-300/80 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative md:h-[300px] justify-between">
+                                                                <div className="w-12 h-12 rounded-full bg-slate-300 text-slate-900 flex items-center justify-center font-black text-xl shadow">
+                                                                    2位
                                                                 </div>
-                                                                <span className="text-xs sm:text-sm font-bold text-slate-300 mt-1">🥈 準優勝</span>
-                                                                <div className="my-2 sm:my-3 text-center">
-                                                                    <div className="text-lg sm:text-xl lg:text-2xl font-black text-white truncate max-w-[200px]">
+                                                                <div className="my-3 text-center w-full">
+                                                                    <div className="text-xl sm:text-2xl lg:text-3xl font-black text-white truncate px-2">
                                                                         {runnerUp ? runnerUp.name : '―'}
                                                                     </div>
                                                                 </div>
-                                                                <div className="bg-slate-900/90 border border-slate-700 px-4 py-2 rounded-xl text-center w-full">
-                                                                    <span className="text-[10px] text-slate-400 block font-mono">TOTAL SCORE</span>
-                                                                    <span className="text-xl sm:text-2xl font-black font-mono text-slate-200">
-                                                                        {runnerUp ? runnerUp.score : 0} <span className="text-xs">pt</span>
+                                                                <div className="bg-slate-900/90 border border-slate-700 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
+                                                                    <span className="text-2xl sm:text-3xl font-black font-mono text-slate-200">
+                                                                        {runnerUp ? runnerUp.score : 0} pt
                                                                     </span>
-                                                                </div>
-                                                                <div className="hidden md:flex w-full h-8 bg-slate-800/60 rounded-lg mt-2 items-center justify-center text-[10px] text-slate-400 font-mono font-bold">
-                                                                    2ND PLACE
                                                                 </div>
                                                             </div>
                                                         );
                                                     })()}
 
-                                                    {/* 🥇 1位 (総合優勝 CHAMPION) - 中央 (一番高く大きく目立たせる) */}
+                                                    {/* 1位 - 中央 */}
                                                     {(() => {
                                                         const champ = allRankedParticipants[0];
                                                         return (
-                                                            <div className="order-1 md:order-2 bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-2 border-amber-400 rounded-2xl sm:rounded-3xl p-6 sm:p-8 flex flex-col items-center shadow-[0_0_45px_rgba(245,158,11,0.35)] relative md:h-[400px] justify-between transform md:-translate-y-4">
+                                                            <div className="order-1 md:order-2 bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-2 border-amber-400 rounded-2xl sm:rounded-3xl p-6 sm:p-8 flex flex-col items-center shadow-[0_0_45px_rgba(245,158,11,0.35)] relative md:h-[360px] justify-between transform md:-translate-y-4">
                                                                 <div className="absolute -top-7 inset-x-0 flex justify-center">
                                                                     <span className="text-4xl animate-bounce drop-shadow">👑</span>
                                                                 </div>
-                                                                <div className="w-14 h-14 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 flex items-center justify-center font-black text-2xl shadow-xl mt-1">
-                                                                    1
+                                                                <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 flex items-center justify-center font-black text-2xl shadow-xl mt-2">
+                                                                    1位
                                                                 </div>
-                                                                <span className="text-sm sm:text-base font-black text-amber-300 tracking-wider">
-                                                                    🏆 総合優勝 CHAMPION 🏆
-                                                                </span>
-                                                                <div className="my-2 sm:my-3 text-center">
-                                                                    <div className="text-2xl sm:text-3xl lg:text-4xl font-black text-white drop-shadow truncate max-w-[240px]">
+                                                                <div className="my-3 text-center w-full">
+                                                                    <div className="text-2xl sm:text-3xl lg:text-5xl font-black text-white drop-shadow truncate px-2">
                                                                         {champ ? champ.name : '―'}
                                                                     </div>
                                                                 </div>
-                                                                <div className="bg-amber-500/20 border border-amber-400/50 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
-                                                                    <span className="text-[10px] sm:text-xs text-amber-300 font-bold block font-mono">CHAMPION SCORE</span>
-                                                                    <span className="text-2xl sm:text-4xl font-black font-mono text-amber-300">
-                                                                        {champ ? champ.score : 0} <span className="text-sm sm:text-base">pt</span>
+                                                                <div className="bg-amber-500/20 border border-amber-400/50 px-6 py-3 rounded-2xl text-center w-full shadow-inner">
+                                                                    <span className="text-3xl sm:text-5xl font-black font-mono text-amber-300">
+                                                                        {champ ? champ.score : 0} pt
                                                                     </span>
-                                                                </div>
-                                                                <div className="hidden md:flex w-full h-12 bg-amber-500/20 rounded-xl mt-2 items-center justify-center text-xs text-amber-300 font-black font-mono tracking-widest border border-amber-500/30">
-                                                                    👑 1ST PLACE WINNER 👑
                                                                 </div>
                                                             </div>
                                                         );
                                                     })()}
 
-                                                    {/* 🥉 3位 (第3位) - 右 */}
+                                                    {/* 3位 - 右 */}
                                                     {(() => {
                                                         const third = allRankedParticipants[2];
                                                         return (
-                                                            <div className="order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-2 border-amber-700/80 rounded-2xl sm:rounded-3xl p-5 sm:p-6 flex flex-col items-center shadow-xl relative md:h-[300px] justify-between">
-                                                                <div className="w-10 h-10 rounded-full bg-amber-700 text-amber-100 flex items-center justify-center font-black text-lg shadow">
-                                                                    3
+                                                            <div className="order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-2 border-amber-700/80 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative md:h-[280px] justify-between">
+                                                                <div className="w-12 h-12 rounded-full bg-amber-700 text-amber-100 flex items-center justify-center font-black text-xl shadow">
+                                                                    3位
                                                                 </div>
-                                                                <span className="text-xs sm:text-sm font-bold text-amber-500 mt-1">🥉 第3位</span>
-                                                                <div className="my-2 sm:my-3 text-center">
-                                                                    <div className="text-lg sm:text-xl lg:text-2xl font-black text-white truncate max-w-[200px]">
+                                                                <div className="my-3 text-center w-full">
+                                                                    <div className="text-xl sm:text-2xl lg:text-3xl font-black text-white truncate px-2">
                                                                         {third ? third.name : '―'}
                                                                     </div>
                                                                 </div>
-                                                                <div className="bg-slate-900/90 border border-slate-800 px-4 py-2 rounded-xl text-center w-full">
-                                                                    <span className="text-[10px] text-slate-400 block font-mono">TOTAL SCORE</span>
-                                                                    <span className="text-xl sm:text-2xl font-black font-mono text-amber-400">
-                                                                        {third ? third.score : 0} <span className="text-xs">pt</span>
+                                                                <div className="bg-slate-900/90 border border-slate-800 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
+                                                                    <span className="text-2xl sm:text-3xl font-black font-mono text-amber-400">
+                                                                        {third ? third.score : 0} pt
                                                                     </span>
-                                                                </div>
-                                                                <div className="hidden md:flex w-full h-6 bg-slate-900 rounded-lg mt-2 items-center justify-center text-[10px] text-slate-500 font-mono font-bold">
-                                                                    3RD PLACE
                                                                 </div>
                                                             </div>
                                                         );
                                                     })()}
                                                 </div>
 
-                                                {/* 4位以下の全参加者一覧 */}
+                                                {/* 4位以下の全参加者一覧：順位、名前、ポイントのみ */}
                                                 {allRankedParticipants.length > 3 && (
-                                                    <div className="w-full mt-4 sm:mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-3 sm:p-4 text-left shadow-lg">
-                                                        <span className="text-xs font-bold text-slate-400 block mb-2">4位以下のランキング:</span>
-                                                        <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto">
+                                                    <div className="w-full mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-left shadow-lg">
+                                                        <div className="flex flex-wrap gap-2.5 max-h-32 overflow-y-auto">
                                                             {allRankedParticipants.slice(3).map((u, i) => (
-                                                                <span key={u.id} className="inline-flex items-center gap-2 px-3 py-1 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-                                                                    <span className="font-mono text-slate-400 font-bold">{i + 4}位</span>
-                                                                    <span className="text-white font-medium">{u.name}</span>
-                                                                    <span className="font-mono text-amber-400 font-bold">{u.score}pt</span>
+                                                                <span key={u.id} className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-sm font-bold">
+                                                                    <span className="font-mono text-slate-400">{i + 4}位</span>
+                                                                    <span className="text-white">{u.name}</span>
+                                                                    <span className="font-mono text-amber-400">{u.score} pt</span>
                                                                 </span>
                                                             ))}
                                                         </div>
@@ -2467,9 +2607,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                             statusRef.current = 'idle';
                                                             broadcastGameState('idle', currentRaceIndex, correctOrder);
                                                         }}
-                                                        className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs transition-all border border-slate-700 shadow"
+                                                        className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-sm transition-all border border-slate-700 shadow"
                                                     >
-                                                        表彰画面を終了して待機画面へ戻る
+                                                        待機画面へ戻る
                                                     </button>
                                                 )}
                                             </div>
@@ -2522,18 +2662,26 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             )}
 
-                                            {/* 着順確定後の進行（分割URLではスクリーンにボタンがないため幹事側に置く） */}
+                                            {/* 着順確定後の進行（次レースへいく ＆ 表彰式へいく） */}
                                             {gameStatus === 'result' && (
-                                                <button
-                                                    onClick={advanceToNextRace}
-                                                    className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs rounded-xl shadow"
-                                                >
-                                                    {currentRaceIndex >= races.length - 1 ? '🏆 全3R終了！総合優勝発表へ' : `次のレース（第${currentRaceIndex + 2}R）へ進む`}
-                                                </button>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <button
+                                                        onClick={goToNextRace}
+                                                        className="py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl shadow"
+                                                    >
+                                                        🏇 次レースへいく
+                                                    </button>
+                                                    <button
+                                                        onClick={goToGrandFinale}
+                                                        className="py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs rounded-xl shadow"
+                                                    >
+                                                        🏆 結果発表へいく
+                                                    </button>
+                                                </div>
                                             )}
                                             {gameStatus === 'grand_finale' && (
                                                 <div className="bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-bold p-2.5 rounded-xl text-center">
-                                                    🏆 会場スクリーンに総合表彰を表示中
+                                                    🏆 会場スクリーンに総合結果発表を表示中
                                                 </div>
                                             )}
                                             {/* 現在のレース情報 */}
@@ -2566,7 +2714,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 {[0, 1, 2].map(rank => (
                                                     <div key={rank} className="flex items-center gap-2 text-xs">
                                                         <span className="w-10 bg-slate-800 text-amber-400 font-mono py-1 rounded text-center text-[10px] font-bold">
-                                                            {rank + 1}着
+                                                             {rank + 1}着
                                                         </span>
                                                         <select
                                                             value={correctOrder[rank]}
@@ -2638,7 +2786,25 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
                                     {adminSubTab === 'edit' && (
                                         <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2 text-xs">
-                                            <span className="text-xs font-bold text-white block mb-1">第1R〜第3R 設問・選択肢の編集</span>
+                                            <div className="flex items-center justify-between gap-1 mb-1">
+                                                <span className="text-xs font-bold text-white block">レース設定（全{races.length}R）</span>
+                                                <div className="flex gap-1.5">
+                                                    <button
+                                                        onClick={addNewRace}
+                                                        className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold text-[10px] shadow"
+                                                    >
+                                                        ＋ 新規レース追加
+                                                    </button>
+                                                    {races.length > 1 && (
+                                                        <button
+                                                            onClick={deleteCurrentRace}
+                                                            className="px-2 py-1 bg-rose-700 hover:bg-rose-600 text-white rounded font-bold text-[10px] shadow"
+                                                        >
+                                                            このR削除
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
                                             <select
                                                 value={currentRaceIndex}
                                                 onChange={(e) => goToRace(parseInt(e.target.value, 10), true)}
