@@ -90,7 +90,7 @@ const AlertTriangle = (p: IconProps) => (
 type GameStatus = 'idle' | 'racing' | 'result' | 'grand_finale';
 type CameraMode = 'follow' | 'side' | 'front' | 'top';
 type DerbyRoute = 'multiview' | 'play' | 'screen' | 'host';
-type AdminSubTab = 'live' | 'edit' | 'cloud';
+type AdminSubTab = 'live' | 'edit';
 type BetOrder = number[]; // [1着Idx, 2着Idx, 3着Idx]
 
 interface DerbyRace {
@@ -1431,8 +1431,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 camera.position.lerp(camTarget.set(targetPos.x, targetPos.y + 3.5, targetPos.z - 24), camLerp);
                 camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
             } else {
-                camera.position.lerp(camTarget.set(-32 / 2 - 8, 28, targetPos.z + 12), camLerp);
-                camera.lookAt(0, 0, targetPos.z - 15);
+                // 俯瞰：右斜め前の角度で上から見下ろし、全頭を1画面で追えるようにする
+                camera.position.lerp(camTarget.set(targetPos.x + 22, 25, targetPos.z - 28), camLerp);
+                camera.lookAt(targetPos.x - 2, 2, targetPos.z + 4);
             }
 
             // スクリーン枠が表示されている時だけ描画（非表示中もレース進行は継続）
@@ -1599,6 +1600,30 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         return list.sort((a, b) => b.score - a.score);
     }, [role, participantId, participantName, participantScore, issuedBetSlip, participants]);
 
+    // 単勝オッズ（投票内容から算出。1位に1票も入っていない馬は 999.9倍）
+    const horseOddsList = useMemo<string[]>(() => {
+        const voteCounts = Array(8).fill(0);
+        let totalVotes = 0;
+        allRankedParticipants.forEach(p => {
+            if (p.betSlip && p.betSlip.length > 0) {
+                const firstChoice = p.betSlip[0];
+                if (typeof firstChoice === 'number' && firstChoice >= 0 && firstChoice < 8) {
+                    voteCounts[firstChoice]++;
+                    totalVotes++;
+                }
+            }
+        });
+
+        return HORSES_DATA.map((_, i) => {
+            const count = voteCounts[i];
+            if (count === 0 || totalVotes === 0) {
+                return "999.9";
+            }
+            const oddsVal = Math.max(1.0, totalVotes / count);
+            return oddsVal.toFixed(1);
+        });
+    }, [allRankedParticipants]);
+
     // 参加者スマホに表示する自分の累計得点（分割URLでは幹事から配信された得点表の値）
     const myScore = role === 'multiview'
         ? participantScore
@@ -1709,7 +1734,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         </div>
                     )}
 
-                    {/* サウンド & クラウド接続状態 */}
+                    {/* サウンド制御（会場スクリーンは画面内に操作あり） */}
                     <div className="flex items-center gap-2">
                         {role !== 'play' && (
                             <button
@@ -1720,31 +1745,27 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                 <span className="text-[11px] font-mono">{isMuted ? 'MUTE' : 'SOUND'}</span>
                             </button>
                         )}
-
-                        <div className="px-2.5 py-1 rounded-full text-[10px] border tracking-wide bg-slate-900 text-slate-300 border-slate-800 flex items-center gap-1.5">
-                            <span className={`w-1.5 h-1.5 rounded-full ${isCloudConnected ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-                            <span className="font-mono">{isCloudConnected ? 'Supabase ONLINE' : 'LOCAL MOCK'}</span>
-                        </div>
                     </div>
                 </header>
             )}
 
-            {/* 分割URLで Supabase 未接続のときは同期されないことを明示 */}
-            {role !== 'multiview' && !isCloudConnected && (
-                <div className="bg-rose-950/80 border-b border-rose-800 text-rose-200 text-xs font-bold px-4 py-2 text-center">
-                    リアルタイム接続が確立していません。他の画面と同期されません（Supabase の環境変数を確認してください）
-                </div>
-            )}
-
             {(
-                <main className={role === 'screen' ? 'flex-1 w-full' : role === 'play' ? 'flex-1 w-full' : 'flex-1 p-3 md:p-5 max-w-7xl mx-auto w-full'}>
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                <main className={
+                    role === 'screen'
+                        ? 'flex-1 w-full'
+                        : role === 'play'
+                            ? 'flex-1 w-full p-2 sm:p-4 max-w-md mx-auto flex flex-col items-center'
+                            : role === 'host'
+                                ? 'flex-1 w-full p-2 sm:p-4 max-w-xl mx-auto flex flex-col'
+                                : 'flex-1 p-3 md:p-5 max-w-7xl mx-auto w-full'
+                }>
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start w-full">
 
                         {/* -------------------------------------------------------- */}
                         {/* [パネル A] 参加者スマホ画面 (/derby/play)                */}
                         {/* -------------------------------------------------------- */}
                         {(derbyRoute === 'multiview' || derbyRoute === 'play') && (
-                            <div className={`${derbyRoute === 'play' ? 'lg:col-span-12 max-w-sm mx-auto' : 'lg:col-span-4'} flex flex-col items-center w-full`}>
+                            <div className={`${derbyRoute === 'play' ? 'lg:col-span-12 max-w-md mx-auto w-full' : 'lg:col-span-4'} flex flex-col items-center w-full`}>
                                 {role === 'multiview' && (
                                     <div className="w-full flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
                                         <span className="flex items-center gap-1.5 text-slate-200">
@@ -1787,10 +1808,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             {/* スマホヘッダー */}
                                             <div className="bg-slate-900 border border-slate-800 p-2.5 rounded-xl flex items-center justify-between">
                                                 <div>
-                                                    <div className="text-xs font-bold text-white truncate max-w-[120px]">{participantName}</div>
-                                                    <div className="text-[9px] text-emerald-400 font-mono flex items-center gap-1">
-                                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> ONLINE
-                                                    </div>
+                                                    <div className="text-xs font-bold text-white truncate max-w-[160px]">{participantName}</div>
                                                 </div>
                                                 <div className="bg-amber-500/20 border border-amber-500/40 text-amber-300 font-black text-xs px-2.5 py-0.5 rounded-full font-mono">
                                                     {myScore} pt
@@ -1801,11 +1819,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl shadow">
                                                 <div className="flex items-center justify-between mb-1">
                                                     <span className="text-[10px] font-bold text-amber-400 font-mono">{currentRace.name}</span>
-                                                    <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.5 rounded font-mono">
-                                                        R{currentRaceIndex + 1}/3
-                                                    </span>
                                                 </div>
-                                                <div className="text-xs font-bold text-white leading-snug">{currentRace.question}</div>
+                                                <div className="text-xs sm:text-sm font-bold text-white leading-snug">{currentRace.question}</div>
                                             </div>
 
                                             {/* レース中のスマホ案内 */}
@@ -1851,12 +1866,12 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                         <div className="w-8 h-8 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto text-sm font-bold">
                                                             ✓
                                                         </div>
-                                                        <div className="text-xs font-bold text-white">第{currentRaceIndex + 1}R 馬券発券完了！</div>
+                                                        <div className="text-xs font-bold text-white">第{currentRaceIndex + 1}R 投票完了！</div>
                                                         <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1 text-left text-xs font-mono">
                                                             {issuedBetSlip.map((hIdx, i) => (
                                                                 <div key={i} className="flex items-center gap-2 p-1.5 bg-slate-900 rounded border border-slate-800">
                                                                     <span className="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center bg-amber-500 text-slate-950">{i + 1}</span>
-                                                                    <span className="text-[11px] font-bold text-white truncate max-w-[150px]">{currentRace.options[hIdx]}</span>
+                                                                    <span className="text-[11px] font-bold text-white truncate flex-1">{currentRace.options[hIdx]}</span>
                                                                 </div>
                                                             ))}
                                                         </div>
@@ -1875,17 +1890,17 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                 <button
                                                                     key={idx}
                                                                     onClick={() => handleChoiceSelect(idx)}
-                                                                    className={`w-full p-2 rounded-xl border text-left transition-all flex items-center justify-between ${isSel ? 'border-amber-400 bg-amber-500/10 shadow' : 'border-slate-800 bg-slate-900 text-slate-200'
+                                                                    className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between ${isSel ? 'border-amber-400 bg-amber-500/10 shadow' : 'border-slate-800 bg-slate-900 text-slate-200 hover:border-slate-700'
                                                                         }`}
                                                                 >
-                                                                    <div className="flex items-center gap-2">
-                                                                        <span className="w-5 h-5 rounded text-xs font-black flex items-center justify-center font-mono shadow text-white" style={{ backgroundColor: h.color }}>
+                                                                    <div className="flex items-center gap-2 flex-1 min-w-0 mr-2">
+                                                                        <span className="w-5 h-5 rounded text-xs font-black flex items-center justify-center font-mono shadow text-white shrink-0" style={{ backgroundColor: h.color }}>
                                                                             {h.letter}
                                                                         </span>
-                                                                        <span className="text-xs font-bold text-white truncate max-w-[170px]">{currentRace.options[idx] || h.name}</span>
+                                                                        <span className="text-xs font-bold text-white truncate flex-1">{currentRace.options[idx] || h.name}</span>
                                                                     </div>
                                                                     {isSel && (
-                                                                        <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-500 text-slate-950">
+                                                                        <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-500 text-slate-950 shrink-0">
                                                                             第{selIdx + 1}位
                                                                         </span>
                                                                     )}
@@ -1969,7 +1984,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                             </span>
                                                             <span className="text-white truncate max-w-[100px]">{currentRace.options[i] || h.name}</span>
                                                         </div>
-                                                        <span className="text-amber-300 font-mono">{h.odds}</span>
+                                                        <span className="text-amber-300 font-mono">{horseOddsList[i]}</span>
                                                     </div>
                                                 ))}
                                             </div>
@@ -1989,7 +2004,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             </div>
 
                                             <div className="bg-slate-950/90 border border-slate-800 px-3 py-1 rounded-lg flex items-center gap-2 shadow font-mono">
-                                                <span className="text-[9px] text-slate-400 font-bold">REMAIN</span>
+                                                <span className="text-[10px] text-slate-300 font-bold">残り</span>
                                                 <span ref={remainCallbackRef} className="text-base text-amber-300 font-black tabular-nums" />
                                                 <span className="text-xs text-slate-400">m</span>
                                             </div>
@@ -2022,7 +2037,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                     <span className="w-4 h-4 rounded text-[9px] font-black flex items-center justify-center text-white" style={{ backgroundColor: h.color }}>{h.letter}</span>
                                                                     <span className="font-bold text-white truncate max-w-[140px]">{currentRace.options[hIdx]}</span>
                                                                 </div>
-                                                                <span className="text-amber-300 font-mono">{h.odds}倍</span>
+                                                                <span className="text-amber-300 font-mono">{horseOddsList[hIdx]}倍</span>
                                                             </div>
                                                         );
                                                     })}
@@ -2091,18 +2106,15 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                     </div>
                                 )}
 
-                                <div className="w-full bg-slate-900 rounded-2xl shadow-xl border border-slate-800 overflow-y-auto p-4 space-y-3" style={{ height: 670 }}>
+                                <div className="w-full bg-slate-900 rounded-2xl shadow-xl border border-slate-800 p-4 space-y-3" style={role === 'host' ? undefined : { height: 670 }}>
 
-                                    {/* 管理サブタブ */}
-                                    <div className="grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-center text-xs font-bold">
-                                        <button onClick={() => setAdminSubTab('live')} className={`py-1 rounded-lg ${adminSubTab === 'live' ? 'bg-amber-500 text-slate-950' : 'text-slate-400'}`}>
+                                    {/* 管理サブタブ（2タブ構成） */}
+                                    <div className="grid grid-cols-2 gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-center text-xs font-bold">
+                                        <button onClick={() => setAdminSubTab('live')} className={`py-1.5 rounded-lg transition-all ${adminSubTab === 'live' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}>
                                             当日進行
                                         </button>
-                                        <button onClick={() => setAdminSubTab('edit')} className={`py-1 rounded-lg ${adminSubTab === 'edit' ? 'bg-slate-800 text-white' : 'text-slate-400'}`}>
+                                        <button onClick={() => setAdminSubTab('edit')} className={`py-1.5 rounded-lg transition-all ${adminSubTab === 'edit' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}>
                                             問題登録
-                                        </button>
-                                        <button onClick={() => setAdminSubTab('cloud')} className={`py-1 rounded-lg ${adminSubTab === 'cloud' ? 'bg-emerald-600 text-white' : 'text-slate-400'}`}>
-                                            Supabase
                                         </button>
                                     </div>
 
@@ -2139,8 +2151,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             {/* 現在のレース情報 */}
                                             <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1.5">
                                                 <div className="flex items-center justify-between">
-                                                    <span className="text-[10px] text-amber-400 font-mono font-bold">進行中レース:</span>
-                                                    <span className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-300 font-mono">
+                                                    <span className="text-[11px] text-amber-400 font-mono font-bold">進行中レース:</span>
+                                                    <span className="text-[11px] bg-slate-800 px-2.5 py-1 rounded text-slate-200 font-mono font-bold">
                                                         投票済: {allRankedParticipants.filter(p => p.betSlip).length} / {allRankedParticipants.length}名
                                                     </span>
                                                 </div>
@@ -2257,15 +2269,16 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-white"
                                                 placeholder="質問文"
                                             />
-                                            <div className="space-y-1 max-h-44 overflow-y-auto pr-1">
+                                            <div className="space-y-1.5">
                                                 {HORSES_DATA.map((h, i) => (
-                                                    <div key={i} className="flex items-center gap-1.5">
-                                                        <span className="w-4 h-4 rounded text-[9px] font-black flex items-center justify-center text-white" style={{ backgroundColor: h.color }}>{h.letter}</span>
+                                                    <div key={i} className="flex items-center gap-2">
+                                                        <span className="w-5 h-5 rounded text-[10px] font-black flex items-center justify-center text-white shrink-0" style={{ backgroundColor: h.color }}>{h.letter}</span>
                                                         <input
                                                             type="text"
                                                             value={currentRace.options[i] || ''}
                                                             onChange={(e) => updateRaceOption(i, e.target.value)}
-                                                            className="flex-1 bg-slate-900 border border-slate-700 rounded p-1 text-xs text-white"
+                                                            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs sm:text-sm text-white"
+                                                            placeholder={`選択肢 ${h.letter}`}
                                                         />
                                                     </div>
                                                 ))}
@@ -2280,54 +2293,10 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                         setToastMessage('保存に失敗しました（ブラウザのストレージ設定を確認してください）');
                                                     }
                                                 }}
-                                                className="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs"
+                                                className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs"
                                             >
                                                 編集内容を保存
                                             </button>
-                                        </div>
-                                    )}
-
-                                    {adminSubTab === 'cloud' && (
-                                        <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2.5 text-xs">
-                                            <span className="font-bold text-white flex items-center gap-1.5">
-                                                <Database className="w-3.5 h-3.5 text-emerald-400" /> Supabase 接続設定
-                                            </span>
-                                            <input
-                                                type="text"
-                                                placeholder="Project URL"
-                                                value={supabaseUrl}
-                                                onChange={(e) => setSupabaseUrl(e.target.value)}
-                                                className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-white font-mono"
-                                            />
-                                            <input
-                                                type="password"
-                                                placeholder="anon public key"
-                                                value={supabaseKey}
-                                                onChange={(e) => setSupabaseKey(e.target.value)}
-                                                className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-white font-mono"
-                                            />
-                                            <button
-                                                onClick={() => {
-                                                    try {
-                                                        localStorage.setItem('derby_supabase_url', supabaseUrl);
-                                                        localStorage.setItem('derby_supabase_key', supabaseKey);
-                                                        setToastMessage('接続情報を保存しました');
-                                                    } catch (e) {
-                                                        console.warn(e);
-                                                    }
-                                                }}
-                                                className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs"
-                                            >
-                                                接続情報を保存
-                                            </button>
-                                            <div className="pt-2 border-t border-slate-800">
-                                                <span className="text-[10px] text-amber-300 font-bold block mb-1">3連単専用 テーブル作成 SQL（コピペ用）:</span>
-                                                <textarea
-                                                    readOnly
-                                                    value={SUPABASE_DERBY_SCHEMA_SQL}
-                                                    className="w-full h-24 bg-slate-900 border border-slate-800 rounded p-1.5 text-[9px] font-mono text-slate-400"
-                                                />
-                                            </div>
                                         </div>
                                     )}
 
