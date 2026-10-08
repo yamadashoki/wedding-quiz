@@ -1013,8 +1013,15 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             sendEvent('race-finished', { raceIndex: raceIdx });
         }
 
-        // 採点は幹事側（正の情報源）だけが行い、得点表を全画面に配信する。
-        // 各端末で別々に採点すると端末ごとに得点がずれるため。
+        // 自分の投票があれば、端末側でも即座に獲得スコアを加算反映
+        if (gained > 0) {
+            setParticipantScore(prev => prev + gained);
+            setParticipants(prev => prev.map(p => (
+                p.id === participantIdRef.current ? { ...p, score: p.score + gained } : p
+            )));
+        }
+
+        // 採点は幹事側（正の情報源）が行い、得点表を全画面に配信する
         if (isAuthority) {
             if (source === 'local') {
                 broadcastGameState('result', raceIdx, order);
@@ -1027,7 +1034,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                     sendEvent('refresh-data', {});
                 }).catch(err => console.error("Finalize DB error:", err));
             }
-            if (gained > 0) setParticipantScore(prev => prev + gained);
             setParticipants(prev => prev.map(p => ({
                 ...p,
                 score: p.score + calculateBetScore(p.betSlip, order)
@@ -1048,10 +1054,15 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         if (payload.races && payload.races.length > 0) setRaces(payload.races);
         if (payload.leaderboard) {
             setParticipants(payload.leaderboard);
-            // リロードした参加者の馬券を復元
+            // リロードした参加者の馬券・得点を復元
             const mine = payload.leaderboard.find(p => p.id === participantIdRef.current);
-            if (mine?.betSlip && payload.currentRaceIndex === raceIndexRef.current && !issuedBetSlipRef.current) {
-                setIssuedBetSlip(mine.betSlip);
+            if (mine) {
+                if (mine.betSlip && payload.currentRaceIndex === raceIndexRef.current && !issuedBetSlipRef.current) {
+                    setIssuedBetSlip(mine.betSlip);
+                }
+                if (typeof mine.score === 'number') {
+                    setParticipantScore(mine.score);
+                }
             }
         }
         const prevStatus = statusRef.current;
@@ -1686,10 +1697,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     }, [allRankedParticipants]);
 
-    // 参加者スマホに表示する自分の累計得点（分割URLでは幹事から配信された得点表の値）
-    const myScore = role === 'multiview'
-        ? participantScore
-        : (participants.find(p => p.id === participantId)?.score ?? 0);
+    // 参加者スマホに表示する自分の累計得点（ローカル即時加算とDB/リスト内スコアの確実な反映）
+    const myScore = useMemo(() => {
+        const fromList = participants.find(p => p.id === participantId)?.score;
+        return Math.max(participantScore, fromList ?? 0);
+    }, [participantScore, participants, participantId]);
 
     // 幹事画面に表示する各画面のURL
     const roleUrl = (r: 'play' | 'screen' | 'host') => `${origin}${basePath}/${r}`;
