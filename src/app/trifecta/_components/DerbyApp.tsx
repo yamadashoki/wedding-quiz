@@ -204,8 +204,8 @@ interface WindowWithExtras {
 }
 const getWin = () => window as unknown as Window & WindowWithExtras;
 
-const RACE_START_Z = 20;
-const FINISH_Z = -400;
+const RACE_START_Z = 0;
+const FINISH_Z = -1000;
 const INITIAL_COMMENTARY = '第4コーナーを回って各馬一斉に最後の直線コースへ入る！';
 // ==============================================================
 // 3連単アンケートゲーム：初期レースデータ（全3R構成・選択肢A〜H）
@@ -813,7 +813,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     // 残り距離・実況テロップの直接DOM更新用（バグ②対策）
     const remainElRef = useRef<HTMLSpanElement | null>(null);
     const commentaryElRef = useRef<HTMLSpanElement | null>(null);
-    const lastRemainRef = useRef(400);
+    const lastRemainRef = useRef(1000);
     const lastCommentaryRef = useRef(INITIAL_COMMENTARY);
 
     // アニメーションループ / コールバック内から最新値を読むための Ref（バグ③対策）
@@ -1014,7 +1014,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             h.finished = false;
             h.mesh.position.set(h.baseLaneX, 0, h.progressZ);
         });
-        writeRemain(400);
+        writeRemain(1000);
         writeCommentary(INITIAL_COMMENTARY);
     }, [writeRemain, writeCommentary]);
 
@@ -1269,16 +1269,16 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         if (!isMounted || !runsSimulation) return;
 
         const trackWidth = 44;
-        const trackLength = 1200;
+        const trackLength = 1600;
 
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x9bd2fc);
-        scene.fog = new THREE.FogExp2(0x9bd2fc, 0.0022);
+        scene.fog = new THREE.FogExp2(0x9bd2fc, 0.0016);
         sceneRef.current = scene;
 
-        const camera = new THREE.PerspectiveCamera(50, 600 / 650, 0.5, 1500);
-        camera.position.set(22, 25, -8);
-        camera.lookAt(-2, 2, 24);
+        const camera = new THREE.PerspectiveCamera(50, 600 / 650, 0.5, 2000);
+        camera.position.set(22, 25, -28);
+        camera.lookAt(-2, 2, 4);
         cameraRef.current = camera;
 
         // 描画は screen / multiview のみ。幹事画面はレース計算だけ行い、WebGL を使わない。
@@ -1330,9 +1330,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         finishPole.position.set(-trackWidth / 2 - 1, 8, FINISH_Z);
         scene.add(finishPole);
 
-        // 残り距離標識（400m / 300m / 200m / 100m）— 茶色の壁側（右斜め前からの俯瞰から美しく見えるよう設置）
+        // 残り距離標識（1000m / 800m / 600m / 400m / 200m / 100m）— 茶色の壁側
         const wallCourseX = -trackWidth / 2 - 0.8; // 茶色の壁のコース側表面
-        [400, 300, 200, 100].forEach(dist => {
+        [1000, 800, 600, 400, 200, 100].forEach(dist => {
             const cv = document.createElement('canvas');
             cv.width = 256; cv.height = 128;
             const c2 = cv.getContext('2d');
@@ -1459,21 +1459,23 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 meshes.forEach((h, idx) => {
                     if (h.finished) return;
                     const remain = h.progressZ - FINISH_Z;
-                    // 残り距離に応じた飛び出し＆大外一気スパート（3d.html 準拠）
-                    if (remain > 260) {
-                        if (idx === 1) h.currentSpeed = 1.25;
+                    // 残り距離に応じた飛び出し＆大外一気スパート（1000m仕様）
+                    if (remain > 600) {
+                        // 序盤〜第3コーナー手前：先行馬が引っ張り、本命馬は脚を温存
+                        if (idx === 1) h.currentSpeed = 1.22;
                         else if (idx === secondIdx || idx === thirdIdx) h.currentSpeed = 1.10;
-                        else if (idx === winnerIdx) h.currentSpeed = 0.95;
+                        else if (idx === winnerIdx) h.currentSpeed = 0.96;
                         else h.currentSpeed = 1.0 + (Math.sin(idx + simTime) * 0.05);
-                    } else if (remain > 160) {
+                    } else if (remain > 280) {
+                        // 中盤〜第4コーナー：後続集団が一気に進出！本命馬が大外へ持ち出す！
                         if (idx === 1) h.currentSpeed = 0.98;
                         else if (idx === winnerIdx) {
                             h.targetLaneX = 7.5; // 大外へ持ち出す！
-                            h.currentSpeed = 1.25;
-                        } else if (idx === secondIdx) h.currentSpeed = 1.12;
+                            h.currentSpeed = 1.24;
+                        } else if (idx === secondIdx) h.currentSpeed = 1.14;
                         else h.currentSpeed = 1.02;
                     } else {
-                        // 直線：幹事指定の1着馬が大外から全頭ごぼう抜き
+                        // 最後の直線：幹事指定の1着馬が大外から全頭をごぼう抜き！スピード感あふれる末脚
                         if (idx === winnerIdx) {
                             h.targetLaneX = 6.8;
                             h.currentSpeed = 1.55;
@@ -1487,9 +1489,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         else h.currentSpeed = 0.98;
                     }
 
-                    h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 2.0);
-                    // レース時間を2倍に（速度を34から17へ半減）
-                    h.progressZ -= h.currentSpeed * 17 * dt;
+                    h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 3.5);
+                    // スピード感あふれる元の速さに戻す（34 m/s）
+                    h.progressZ -= h.currentSpeed * 34 * dt;
                     if (h.progressZ <= FINISH_Z) {
                         h.progressZ = FINISH_Z;
                         h.finished = true;
@@ -1520,12 +1522,12 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             }
 
             meshes.forEach((h, idx) => {
-                // メッシュへ反映
+                // メッシュへ反映（スピード感あふれる高速ストライド・弾み）
                 h.mesh.position.x = h.currentLaneX;
                 h.mesh.position.z = h.progressZ;
-                h.mesh.position.y = isRacing && !h.finished ? Math.abs(Math.sin(time * 10 * h.currentSpeed)) * 0.35 : 0;
+                h.mesh.position.y = isRacing && !h.finished ? Math.abs(Math.sin(time * 18 * h.currentSpeed)) * 0.28 : 0;
 
-                const legSpeed = isRacing && !h.finished ? 10 * h.currentSpeed : 4;
+                const legSpeed = isRacing && !h.finished ? 17 * h.currentSpeed : 6;
                 const swing = Math.sin(time * legSpeed + idx);
                 h.legs.legFL.rotation.x = swing * 0.75;
                 h.legs.legBR.rotation.x = swing * 0.75;
@@ -1546,7 +1548,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
             if (isRacing) {
                 gallopTimer += delta;
-                if (renders3D && gallopTimer > 0.32 && soundRef.current) {
+                if (renders3D && gallopTimer > 0.18 && soundRef.current) {
                     soundRef.current.playGallop();
                     gallopTimer = 0;
                 }
@@ -1566,7 +1568,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 }
 
                 // 残り距離
-                const remain = Math.min(400, Math.max(0, Math.floor(leadHorse.progressZ - FINISH_Z)));
+                const remain = Math.min(1000, Math.max(0, Math.floor(leadHorse.progressZ - FINISH_Z)));
                 writeRemain(remain);
 
                 // 全頭ゴール → 1回だけ確定処理（statusRef も即時更新して次フレームで再発火しない）
@@ -2317,7 +2319,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-xl px-4 py-2 flex items-center justify-between shadow-xl font-mono w-64 sm:w-80">
                                                 <span className="text-xs sm:text-sm text-slate-300 font-bold">残り距離</span>
                                                 <div className="flex items-baseline gap-1">
-                                                    <span ref={remainCallbackRef} className="text-2xl sm:text-3xl text-amber-300 font-black tabular-nums">400</span>
+                                                    <span ref={remainCallbackRef} className="text-2xl sm:text-3xl text-amber-300 font-black tabular-nums">1000</span>
                                                     <span className="text-xs sm:text-sm text-slate-400 font-bold">m</span>
                                                 </div>
                                             </div>
