@@ -796,8 +796,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const [origin, setOrigin] = useState('');
     const [isCloudConnected, setIsCloudConnected] = useState(false);
 
-    // レース終了ガード（バグ④対策：完了処理は1レース1回だけ）
+    // レース終了ガード（バグ④対策：完了処理は1レース1回だけ、確定レースの再走を完全防止）
     const hasFinishedRef = useRef(false);
+    const finishedRacesRef = useRef<Set<number>>(new Set());
 
     // Three.js 系 Ref（コンポーネント生存中は1つの renderer / WebGL コンテキストを使い回す）
     const containerElRef = useRef<HTMLDivElement | null>(null);
@@ -869,13 +870,24 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 if (game) {
                     setCurrentRaceIndex(game.currentRaceIndex);
                     raceIndexRef.current = game.currentRaceIndex;
-                    // レース進行中（statusRef === 'racing'）に古い idle / result レスポンスで上書きされるのを防ぐ
-                    if (statusRef.current !== 'racing' || game.status === 'racing') {
-                        if (game.status === 'racing' && statusRef.current !== 'racing') {
-                            resetHorsePositionsRef.current();
+
+                    const isThisRaceFinished = finishedRacesRef.current.has(game.currentRaceIndex) ||
+                        (game.currentRaceIndex === raceIndexRef.current && (hasFinishedRef.current || statusRef.current === 'result'));
+
+                    // 既に確定したレースに対して、DB の古い racing 状態で勝手に再スタートさせない！
+                    if (game.status === 'racing' && isThisRaceFinished) {
+                        // 確定済みなので racing への巻き戻しを完全に無視
+                    } else if (game.status === 'racing' && statusRef.current !== 'racing') {
+                        // 管理者が新たに発走させた場合のみスタート
+                        resetHorsePositionsRef.current();
+                        setGameStatus('racing');
+                        statusRef.current = 'racing';
+                    } else if (game.status !== 'racing') {
+                        // レース進行中（statusRef === 'racing'）に古い idle / result レスポンスで上書きされるのを防ぐ
+                        if (statusRef.current !== 'racing') {
+                            setGameStatus(game.status);
+                            statusRef.current = game.status;
                         }
-                        setGameStatus(game.status);
-                        statusRef.current = game.status;
                     }
                     if (game.correctOrder) {
                         setCorrectOrder(game.correctOrder);
@@ -1058,6 +1070,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const finalizeRace = useCallback((source: 'local' | 'remote') => {
         if (hasFinishedRef.current) return;
         hasFinishedRef.current = true;
+        finishedRacesRef.current.add(raceIndexRef.current);
 
         const order = correctOrderRef.current;
         const raceIdx = raceIndexRef.current;
@@ -1141,7 +1154,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }
 
         if (payload.status === 'racing') {
-            if (prevStatus !== 'racing' || hasFinishedRef.current) {
+            const isThisRaceFinished = finishedRacesRef.current.has(payload.currentRaceIndex) ||
+                (payload.currentRaceIndex === raceIndexRef.current && (hasFinishedRef.current || statusRef.current === 'result'));
+            if (isThisRaceFinished) {
+                // 既に確定済みのレースであれば racing は完全に無視して結果表示を維持！
+                return;
+            }
+            if (prevStatus !== 'racing') {
                 resetHorsePositionsRef.current();
                 soundRef.current?.playFanfare();
             }
@@ -1451,6 +1470,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             const currentCam = cameraModeRef.current;
             const [winnerIdx, secondIdx, thirdIdx] = correctOrderRef.current;
             const isRacing = currentStatus === 'racing';
+            // レースごとに異なる4種類のドラマチック演出シナリオ（大外一気、イン強襲、壮絶一騎打ち、逃げ粘り）
+            const scenario = Math.abs(raceIndexRef.current || 0) % 4;
 
             let leadHorse = meshes[0];
 
@@ -1459,34 +1480,127 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 meshes.forEach((h, idx) => {
                     if (h.finished) return;
                     const remain = h.progressZ - FINISH_Z;
-                    // 残り距離に応じた飛び出し＆大外一気スパート（1000m仕様）
-                    if (remain > 600) {
-                        // 序盤〜第3コーナー手前：先行馬が引っ張り、本命馬は脚を温存
-                        if (idx === 1) h.currentSpeed = 1.22;
-                        else if (idx === secondIdx || idx === thirdIdx) h.currentSpeed = 1.10;
-                        else if (idx === winnerIdx) h.currentSpeed = 0.96;
-                        else h.currentSpeed = 1.0 + (Math.sin(idx + simTime) * 0.05);
+
+                    // 各馬固有の激しいペースの波（道中の大混戦・抜きつ抜かれつのデッドヒート）
+                    const wave1 = Math.sin(simTime * 2.3 + idx * 1.85 + scenario * 0.7);
+                    const wave2 = Math.cos(simTime * 1.45 + idx * 2.9);
+                    const deadHeatJitter = (wave1 * 0.16) + (wave2 * 0.08);
+
+                    if (remain > 650) {
+                        // 【第1ステージ：スタート〜残り650m】
+                        // 序盤から全馬が激しく競り合い！順位が目まぐるしくシャッフル
+                        const baseSpeed = 1.05 + deadHeatJitter;
+                        if (scenario === 3 && idx === winnerIdx) {
+                            h.currentSpeed = 1.18 + deadHeatJitter; // 逃げパターン
+                        } else {
+                            h.currentSpeed = Math.max(0.88, Math.min(1.25, baseSpeed));
+                        }
                     } else if (remain > 280) {
-                        // 中盤〜第4コーナー：後続集団が一気に進出！本命馬が大外へ持ち出す！
-                        if (idx === 1) h.currentSpeed = 0.98;
-                        else if (idx === winnerIdx) {
-                            h.targetLaneX = 7.5; // 大外へ持ち出す！
-                            h.currentSpeed = 1.24;
-                        } else if (idx === secondIdx) h.currentSpeed = 1.14;
-                        else h.currentSpeed = 1.02;
+                        // 【第2ステージ：中盤〜勝負どころ残り280m】
+                        // 後続集団が一気に押し寄せ、全頭が固まってのデッドヒート！
+                        const baseSpeed = 1.08 + deadHeatJitter;
+                        if (scenario === 0) {
+                            // パターン0: 大外一気型（本命馬が大外へコースを取る）
+                            if (idx === winnerIdx) {
+                                h.targetLaneX = 7.2;
+                                h.currentSpeed = 1.20;
+                            } else if (idx === secondIdx) {
+                                h.currentSpeed = 1.15 + deadHeatJitter;
+                            } else {
+                                h.currentSpeed = baseSpeed;
+                            }
+                        } else if (scenario === 1) {
+                            // パターン1: イン強襲型（本命馬が内ラチ沿いに潜り込む）
+                            if (idx === winnerIdx) {
+                                h.targetLaneX = -7.0;
+                                h.currentSpeed = 1.18;
+                            } else if (idx === secondIdx) {
+                                h.currentSpeed = 1.16 + deadHeatJitter;
+                            } else {
+                                h.currentSpeed = baseSpeed;
+                            }
+                        } else if (scenario === 2) {
+                            // パターン2: 2頭一騎打ち型（上位2頭が馬群を割って並びかける）
+                            if (idx === winnerIdx) {
+                                h.targetLaneX = 1.8;
+                                h.currentSpeed = 1.22 + Math.sin(simTime * 3.0) * 0.06;
+                            } else if (idx === secondIdx) {
+                                h.targetLaneX = -1.8;
+                                h.currentSpeed = 1.22 - Math.sin(simTime * 3.0) * 0.06;
+                            } else {
+                                h.currentSpeed = baseSpeed;
+                            }
+                        } else {
+                            // パターン3: 逃げ粘り型（先頭集団が激しくせめぎ合う）
+                            if (idx === winnerIdx) {
+                                h.currentSpeed = 1.16 + Math.sin(simTime * 2.0) * 0.05;
+                            } else if (idx === secondIdx || idx === thirdIdx) {
+                                h.currentSpeed = 1.18 + deadHeatJitter;
+                            } else {
+                                h.currentSpeed = baseSpeed;
+                            }
+                        }
                     } else {
-                        // 最後の直線：幹事指定の1着馬が大外から全頭をごぼう抜き！スピード感あふれる末脚
-                        if (idx === winnerIdx) {
-                            h.targetLaneX = 6.8;
-                            h.currentSpeed = 1.55;
-                        } else if (idx === secondIdx) {
-                            h.targetLaneX = -2.0;
-                            h.currentSpeed = 1.28;
-                        } else if (idx === thirdIdx) {
-                            h.targetLaneX = 1.0;
-                            h.currentSpeed = 1.20;
-                        } else if (idx === 1) h.currentSpeed = 0.85;
-                        else h.currentSpeed = 0.98;
+                        // 【最終直線：残り280m〜ゴール】
+                        // 各シナリオに応じた最高潮のクライマックス！幹事指定の正解着順へドラマチックに収束
+                        if (scenario === 0) {
+                            // 大外から一気のゴボウ抜き！
+                            if (idx === winnerIdx) {
+                                h.targetLaneX = 6.8;
+                                h.currentSpeed = 1.62;
+                            } else if (idx === secondIdx) {
+                                h.targetLaneX = -2.0;
+                                h.currentSpeed = 1.30;
+                            } else if (idx === thirdIdx) {
+                                h.targetLaneX = 1.0;
+                                h.currentSpeed = 1.20;
+                            } else {
+                                h.currentSpeed = 0.94 + Math.sin(idx + simTime) * 0.04;
+                            }
+                        } else if (scenario === 1) {
+                            // インの内ラチ沿いから電光石火の強襲！
+                            if (idx === winnerIdx) {
+                                h.targetLaneX = -6.8;
+                                h.currentSpeed = 1.60;
+                            } else if (idx === secondIdx) {
+                                h.targetLaneX = 2.5;
+                                h.currentSpeed = 1.32;
+                            } else if (idx === thirdIdx) {
+                                h.targetLaneX = -0.5;
+                                h.currentSpeed = 1.22;
+                            } else {
+                                h.currentSpeed = 0.94 + Math.sin(idx + simTime) * 0.04;
+                            }
+                        } else if (scenario === 2) {
+                            // 壮絶な一騎打ち！ゴール前20mまで鼻差の叩き合い
+                            if (idx === winnerIdx) {
+                                h.targetLaneX = 1.5;
+                                const finalPush = remain < 35 ? 0.12 : 0;
+                                h.currentSpeed = 1.46 + Math.sin(simTime * 4.5) * 0.06 + finalPush;
+                            } else if (idx === secondIdx) {
+                                h.targetLaneX = -1.5;
+                                h.currentSpeed = 1.46 - Math.sin(simTime * 4.5) * 0.06;
+                            } else if (idx === thirdIdx) {
+                                h.targetLaneX = 4.0;
+                                h.currentSpeed = 1.25;
+                            } else {
+                                h.currentSpeed = 0.92 + Math.sin(idx + simTime) * 0.04;
+                            }
+                        } else {
+                            // 逃げ粘り！猛追する2着・3着をギリギリしのぎ切る
+                            if (idx === winnerIdx) {
+                                h.targetLaneX = 0;
+                                h.currentSpeed = 1.38;
+                            } else if (idx === secondIdx) {
+                                h.targetLaneX = -2.2;
+                                h.currentSpeed = 1.36;
+                            } else if (idx === thirdIdx) {
+                                h.targetLaneX = 2.2;
+                                h.currentSpeed = 1.33;
+                            } else {
+                                h.currentSpeed = 0.93 + Math.sin(idx + simTime) * 0.04;
+                            }
+                        }
                     }
 
                     h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 3.5);
@@ -1571,6 +1685,27 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 const remain = Math.min(1000, Math.max(0, Math.floor(leadHorse.progressZ - FINISH_Z)));
                 writeRemain(remain);
 
+                // 残り距離とシナリオに応じたリアルタイム迫力実況
+                if (remain > 750) {
+                    writeCommentary("全馬一斉にスタート！各馬激しいポジション争い！");
+                } else if (remain > 500) {
+                    writeCommentary("道中は目まぐるしく先頭が入れ替わる大混戦！誰が勝つか分からない！");
+                } else if (remain > 280) {
+                    if (scenario === 0) writeCommentary("第4コーナー！後方から大外へ持ち出した！");
+                    else if (scenario === 1) writeCommentary("第4コーナー！インコース内ラチ沿いに潜り込む！");
+                    else if (scenario === 2) writeCommentary("2頭が抜け出した！壮絶な一騎打ちの様相！");
+                    else writeCommentary("直線コースへ！先頭集団が意地と意地のぶつかり合い！");
+                } else if (remain > 70) {
+                    if (scenario === 0) writeCommentary("残り200m！大外一気！豪快な末脚が炸裂したー！！");
+                    else if (scenario === 1) writeCommentary("残り200m！内から一閃！最短コースを電光石火で突き抜ける！");
+                    else if (scenario === 2) writeCommentary("残り200m！叩き合い！並んだ！ハナ差の壮絶なデッドヒート！！");
+                    else writeCommentary("残り200m！必死の二枚腰！逃げ切れるか！迫る追撃！！");
+                } else if (remain > 0) {
+                    writeCommentary("ゴール板前！最後の力を振り絞る！大激戦のゴールインへ！！");
+                } else {
+                    writeCommentary("ゴールイン！！大歓声の中、着順が確定しました！");
+                }
+
                 // 全頭ゴール → 1回だけ確定処理（statusRef も即時更新して次フレームで再発火しない）
                 if (!hasFinishedRef.current && meshes.every(m => m.finished)) {
                     statusRef.current = 'result';
@@ -1638,6 +1773,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     // --------------------------------------------------------------
     const startDerbyRace = useCallback(() => {
         if (statusRef.current === 'racing') return;
+        finishedRacesRef.current.delete(currentRaceIndex);
+        hasFinishedRef.current = false;
         resetHorsePositions();
         statusRef.current = 'racing';
         setGameStatus('racing');
@@ -1662,6 +1799,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const goToRace = useCallback((idx: number, broadcast: boolean) => {
         const race = races[idx];
         if (!race) return;
+        finishedRacesRef.current.delete(idx);
+        hasFinishedRef.current = false;
         const newOrder = race.correctOrder || [0, 1, 2];
         setCurrentRaceIndex(idx);
         setGameStatus('idle');
@@ -1758,6 +1897,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }, [currentRaceIndex, correctOrder, broadcastGameState]);
 
     const rebetCurrentRace = useCallback(() => {
+        finishedRacesRef.current.delete(currentRaceIndex);
+        hasFinishedRef.current = false;
         setGameStatus('idle');
         statusRef.current = 'idle';
         setIssuedBetSlip(null);
@@ -1775,6 +1916,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }, [currentRaceIndex, correctOrder, resetHorsePositions, broadcastGameState, loadInitialDataFromDB, sendEvent]);
 
     const resetEntireTournament = useCallback(() => {
+        finishedRacesRef.current.clear();
+        hasFinishedRef.current = false;
         const firstRace = races[0];
         const newOrder = firstRace?.correctOrder || [6, 4, 0];
         setCurrentRaceIndex(0);
@@ -2311,11 +2454,35 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                         </button>
                                     )}
 
-                                    {/* スクリーン上部オーバーレイ（左：残り距離 ＆ リアルタイム順位・投票数ボード、右：カメラ切替） */}
+                                    {/* スクリーン上部オーバーレイ（左：コンパクトなレース表示、右：カメラ切替・残り距離・順位変動一覧ボード） */}
                                     <div className="absolute top-0 inset-x-0 p-3 sm:p-4 z-20 flex items-start justify-between pointer-events-none">
-                                        {/* 左上：残り距離 ＆ 選択肢ボード */}
+                                        {/* 左上：視界を遮らないコンパクトなレース表示（壁側の1000m〜GOAL標識が一望可能） */}
                                         <div className="flex flex-col gap-2 pointer-events-auto">
-                                            {/* 残り距離メーター（左上に設置） */}
+                                            <div className="bg-slate-950/85 backdrop-blur border border-slate-700/80 rounded-xl px-3.5 py-2 shadow-xl font-mono flex items-center gap-2">
+                                                <span className="text-base sm:text-lg">🏇</span>
+                                                <div>
+                                                    <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Race {currentRaceIndex + 1}</div>
+                                                    <div className="text-xs sm:text-sm font-black text-white truncate max-w-[180px] sm:max-w-xs">{currentRace.name}</div>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        {/* 右側：カメラ切替 ＋ 残り距離メーター ＋ 選択肢＆リアルタイム順位変動ボード */}
+                                        <div className="flex flex-col items-end gap-2 pointer-events-auto">
+                                            {/* カメラアングル切り替えボタン */}
+                                            <div className="flex gap-1 bg-slate-950/85 backdrop-blur p-1 rounded-xl border border-slate-800 shadow">
+                                                {(['follow', 'side', 'front', 'top'] as CameraMode[]).map(m => (
+                                                    <button
+                                                        key={m}
+                                                        onClick={() => setCameraMode(m)}
+                                                        className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${cameraMode === m ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
+                                                    >
+                                                        {m === 'follow' ? '追走' : m === 'side' ? 'サイド' : m === 'front' ? '正面' : '俯瞰'}
+                                                    </button>
+                                                ))}
+                                            </div>
+
+                                            {/* 残り距離メーター（右側に設置） */}
                                             <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-xl px-4 py-2 flex items-center justify-between shadow-xl font-mono w-64 sm:w-80">
                                                 <span className="text-xs sm:text-sm text-slate-300 font-bold">残り距離</span>
                                                 <div className="flex items-baseline gap-1">
@@ -2324,7 +2491,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             </div>
 
-                                            {/* 拡大された選択肢 ＆ リアルタイム順位変動ボード */}
+                                            {/* 拡大された選択肢 ＆ リアルタイム順位変動ボード（右側に設置） */}
                                             <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-2xl p-3 shadow-2xl w-64 sm:w-80 font-mono">
                                                 <div className="text-xs sm:text-sm font-black text-amber-300 border-b border-slate-800 pb-2 mb-2 flex justify-between items-center">
                                                     <span className="truncate max-w-[170px] sm:max-w-[200px]">{currentRace.name}</span>
@@ -2373,21 +2540,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                         });
                                                     })()}
                                                 </div>
-                                            </div>
-                                        </div>
-
-                                        {/* 右上：カメラアングル切り替えボタン */}
-                                        <div className="flex flex-col items-end gap-2 pointer-events-auto">
-                                            <div className="flex gap-1 bg-slate-950/85 backdrop-blur p-1 rounded-xl border border-slate-800 shadow">
-                                                {(['follow', 'side', 'front', 'top'] as CameraMode[]).map(m => (
-                                                    <button
-                                                        key={m}
-                                                        onClick={() => setCameraMode(m)}
-                                                        className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${cameraMode === m ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                                                    >
-                                                        {m === 'follow' ? '追走' : m === 'side' ? 'サイド' : m === 'front' ? '正面' : '俯瞰'}
-                                                    </button>
-                                                ))}
                                             </div>
                                         </div>
                                     </div>
