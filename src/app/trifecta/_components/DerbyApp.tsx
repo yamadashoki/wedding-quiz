@@ -748,7 +748,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const [isMuted, setIsMuted] = useState(role === 'host' || role === 'play'); // 音は会場スクリーンから出す
 
     // カメラ（残り距離・実況は React State にせず ref で DOM 直接更新する）
-    const [cameraMode, setCameraMode] = useState<CameraMode>('follow');
+    const [cameraMode, setCameraMode] = useState<CameraMode>('top');
     // レース中のリアルタイム順位（並び替え演出用）
     const [realtimeRanks, setRealtimeRanks] = useState<number[]>([0, 1, 2, 3, 4, 5, 6, 7]);
 
@@ -869,8 +869,14 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 if (game) {
                     setCurrentRaceIndex(game.currentRaceIndex);
                     raceIndexRef.current = game.currentRaceIndex;
-                    setGameStatus(game.status);
-                    statusRef.current = game.status;
+                    // レース進行中（statusRef === 'racing'）に古い idle / result レスポンスで上書きされるのを防ぐ
+                    if (statusRef.current !== 'racing' || game.status === 'racing') {
+                        if (game.status === 'racing' && statusRef.current !== 'racing') {
+                            resetHorsePositionsRef.current();
+                        }
+                        setGameStatus(game.status);
+                        statusRef.current = game.status;
+                    }
                     if (game.correctOrder) {
                         setCorrectOrder(game.correctOrder);
                         correctOrderRef.current = game.correctOrder;
@@ -1134,9 +1140,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             setParticipants(prev => prev.map(p => ({ ...p, betSlip: null })));
         }
 
-        if (payload.status === 'racing' && prevStatus !== 'racing') {
-            resetHorsePositionsRef.current();
-            soundRef.current?.playFanfare();
+        if (payload.status === 'racing') {
+            if (prevStatus !== 'racing' || hasFinishedRef.current) {
+                resetHorsePositionsRef.current();
+                soundRef.current?.playFanfare();
+            }
             statusRef.current = 'racing';
             setGameStatus('racing');
         } else if (payload.status === 'result') {
@@ -1269,7 +1277,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         sceneRef.current = scene;
 
         const camera = new THREE.PerspectiveCamera(50, 600 / 650, 0.5, 1500);
-        camera.position.set(0, 8, 25);
+        camera.position.set(22, 25, -8);
+        camera.lookAt(-2, 2, 24);
         cameraRef.current = camera;
 
         // 描画は screen / multiview のみ。幹事画面はレース計算だけ行い、WebGL を使わない。
@@ -1321,22 +1330,82 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         finishPole.position.set(-trackWidth / 2 - 1, 8, FINISH_Z);
         scene.add(finishPole);
 
-        // 残り距離標識（300m / 200m / 100m）— 外ラチ側
-        [300, 200, 100].forEach(dist => {
+        // 残り距離標識（400m / 300m / 200m / 100m）— 茶色の壁側（右斜め前からの俯瞰から美しく見えるよう設置）
+        const wallCourseX = -trackWidth / 2 - 0.8; // 茶色の壁のコース側表面
+        [400, 300, 200, 100].forEach(dist => {
             const cv = document.createElement('canvas');
-            cv.width = 128; cv.height = 64;
+            cv.width = 256; cv.height = 128;
             const c2 = cv.getContext('2d');
             if (!c2) return;
-            c2.fillStyle = '#ffffff'; c2.fillRect(0, 0, 128, 64);
-            c2.fillStyle = '#b91c1c'; c2.font = 'bold 40px sans-serif';
-            c2.textAlign = 'center'; c2.textBaseline = 'middle';
-            c2.fillText(String(dist), 64, 34);
-            const board = new THREE.Mesh(new THREE.PlaneGeometry(3, 1.5), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), side: THREE.DoubleSide }));
-            board.position.set(trackWidth / 2 + 1.5, 4, FINISH_Z + dist);
-            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4, 6), new THREE.MeshLambertMaterial({ color: 0xffffff }));
-            pole.position.set(trackWidth / 2 + 1.5, 2, FINISH_Z + dist);
-            scene.add(board, pole);
+            // 白地パネル ＋ 赤枠線
+            c2.fillStyle = '#ffffff';
+            c2.fillRect(0, 0, 256, 128);
+            c2.lineWidth = 10;
+            c2.strokeStyle = '#dc2626';
+            c2.strokeRect(5, 5, 246, 118);
+
+            // 残り距離 数字
+            c2.fillStyle = '#dc2626';
+            c2.font = '900 68px "Impact", "Arial Black", sans-serif';
+            c2.textAlign = 'center';
+            c2.textBaseline = 'middle';
+            c2.fillText(String(dist), 128, 52);
+
+            // "残り" ＋ "m" サブテキスト
+            c2.fillStyle = '#1e293b';
+            c2.font = 'bold 24px sans-serif';
+            c2.fillText(`残り ${dist}m`, 128, 102);
+
+            const tex = new THREE.CanvasTexture(cv);
+            const boardMat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+            const board = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 2.6), boardMat);
+            // 茶色の壁面（X = wallCourseX）、高さ Y = 7 に固定
+            board.position.set(wallCourseX, 7, FINISH_Z + dist);
+            // 右斜め前（Xプラス・Zマイナス上空）の俯瞰カメラから最も見やすい角度（約75度）に傾ける
+            board.rotation.y = Math.PI * 0.45;
+
+            // 壁と看板を接続するステー（金具アーム）
+            const arm = new THREE.Mesh(
+                new THREE.BoxGeometry(1.2, 0.25, 0.25),
+                new THREE.MeshLambertMaterial({ color: 0x334155 })
+            );
+            arm.position.set(wallCourseX - 0.5, 7, FINISH_Z + dist);
+
+            // 内ラチ沿いの補助ポール（地上からの支柱）
+            const post = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.12, 0.12, 7, 8),
+                new THREE.MeshLambertMaterial({ color: 0xffffff })
+            );
+            post.position.set(wallCourseX + 0.1, 3.5, FINISH_Z + dist);
+
+            scene.add(board, arm, post);
         });
+
+        // ゴール板（Z = FINISH_Z = -400）も茶色の壁側に大型「GOAL」看板を設置
+        const goalCv = document.createElement('canvas');
+        goalCv.width = 256; goalCv.height = 128;
+        const gc = goalCv.getContext('2d');
+        if (gc) {
+            gc.fillStyle = '#b91c1c';
+            gc.fillRect(0, 0, 256, 128);
+            gc.lineWidth = 8;
+            gc.strokeStyle = '#facc15';
+            gc.strokeRect(4, 4, 248, 120);
+            gc.fillStyle = '#facc15';
+            gc.font = '900 60px "Impact", sans-serif';
+            gc.textAlign = 'center';
+            gc.textBaseline = 'middle';
+            gc.fillText('GOAL', 128, 56);
+            gc.fillStyle = '#ffffff';
+            gc.font = 'bold 22px sans-serif';
+            gc.fillText('FINISH LINE', 128, 102);
+
+            const goalTex = new THREE.CanvasTexture(goalCv);
+            const goalBoard = new THREE.Mesh(new THREE.PlaneGeometry(6, 3), new THREE.MeshBasicMaterial({ map: goalTex, side: THREE.DoubleSide }));
+            goalBoard.position.set(wallCourseX, 8, FINISH_Z);
+            goalBoard.rotation.y = Math.PI * 0.45;
+            scene.add(goalBoard);
+        }
 
         // 8頭配置（コース拡大に合わせて配置幅も調整）
         const meshes: HorseObject[] = [];
@@ -1429,6 +1498,16 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             };
 
             if (isRacing) {
+                // 安全策：レース中なのに全馬finishedのままなら即座にスタート位置へ自己修復
+                if (meshes.length > 0 && meshes.every(m => m.finished) && !hasFinishedRef.current) {
+                    meshes.forEach((h, i) => {
+                        h.progressZ = RACE_START_Z - (i * 0.8);
+                        h.finished = false;
+                        h.currentSpeed = 1.0;
+                        h.currentLaneX = h.baseLaneX;
+                        h.targetLaneX = h.baseLaneX;
+                    });
+                }
                 simAccumulator += delta;
                 let steps = 0;
                 while (simAccumulator >= SIM_STEP && steps < 30) {
@@ -1472,15 +1551,18 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                     gallopTimer = 0;
                 }
 
-                // リアルタイム順位並び替え（約0.18秒おきに各馬の進行度から順位を算出して反映）
+                // リアルタイム順位並び替え（約0.2秒おきに各馬の進行度から順位を算出して反映）
                 rankUpdateTimer += delta;
-                if (rankUpdateTimer >= 0.18) {
+                if (rankUpdateTimer >= 0.2) {
                     rankUpdateTimer = 0;
                     const sorted = meshes
                         .map((m, mIdx) => ({ idx: mIdx, z: m.progressZ }))
                         .sort((a, b) => a.z - b.z)
                         .map(item => item.idx);
-                    setRealtimeRanks(sorted);
+                    setRealtimeRanks(prev => {
+                        const isSame = prev.length === sorted.length && prev.every((v, i) => v === sorted[i]);
+                        return isSame ? prev : sorted;
+                    });
                 }
 
                 // 残り距離
@@ -1508,9 +1590,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 camera.position.lerp(camTarget.set(targetPos.x, targetPos.y + 5, targetPos.z - 32), camLerp);
                 camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
             } else {
-                // 俯瞰：上空からコース全体と全8頭を見下ろし、大迫力で全体が綺麗に収まる画角
-                camera.position.lerp(camTarget.set(0, 52, targetPos.z - 44), camLerp);
-                camera.lookAt(0, 0, targetPos.z + 12);
+                // 俯瞰：右斜め前の角度で上から見下ろし、全頭を1画面で追えるようにする
+                camera.position.lerp(camTarget.set(targetPos.x + 22, 25, targetPos.z - 28), camLerp);
+                camera.lookAt(targetPos.x - 2, 2, targetPos.z + 4);
             }
 
             // スクリーン枠が表示されている時だけ描画（非表示中もレース進行は継続）
@@ -1553,7 +1635,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     // 進行操作
     // --------------------------------------------------------------
     const startDerbyRace = useCallback(() => {
-        if (statusRef.current !== 'idle') return;
+        if (statusRef.current === 'racing') return;
         resetHorsePositions();
         statusRef.current = 'racing';
         setGameStatus('racing');
