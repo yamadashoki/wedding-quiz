@@ -732,7 +732,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     // ・3D描画はスクリーン（screen）と開発用のみ。参加者スマホでは3Dを一切動かさない
     const isAuthority = role === 'host' || role === 'multiview';
     const renders3D = role === 'screen' || role === 'multiview';
-    const runsSimulation = role !== 'play';
+    // 3Dを描画する画面（会場スクリーン）のみが物理シミュレーションを動かす（幹事・参加者は描画もシミュレーションもせずゴール通知を待つ）
+    const runsSimulation = renders3D;
 
     const [isMounted, setIsMounted] = useState(false);
 
@@ -1019,7 +1020,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const resetHorsePositions = useCallback(() => {
         hasFinishedRef.current = false;
         horseMeshesRef.current.forEach((h, i) => {
-            h.progressZ = RACE_START_Z - (i * 0.8);
+            // 奇数番と偶数番で前後をずらし、バッジが重ならず綺麗に見えるようにする
+            h.progressZ = RACE_START_Z - ((i % 2) * 2.0) - (i * 0.4);
             h.currentSpeed = 1.0;
             h.currentLaneX = h.baseLaneX;
             h.targetLaneX = h.baseLaneX;
@@ -1168,9 +1170,14 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             setGameStatus('racing');
         } else if (payload.status === 'result') {
             if (renders3D && prevStatus === 'racing') {
-                // スクリーンは自分のレース映像のゴールを待つ（通信遅延で数百ms先に幹事が確定するため）。
-                // 念のため3秒で強制確定。
-                window.setTimeout(() => finalizeRaceRef.current('remote'), 3000);
+                // スクリーンは自分の3Dレース映像で先頭馬がゴール板を駆け抜けるのを優先
+                // レース途中で強制打ち切りせず、スクリーンのゴール判定に任せる
+                const leadRemain = horseMeshesRef.current.length > 0
+                    ? Math.min(...horseMeshesRef.current.map(m => m.progressZ - FINISH_Z))
+                    : 1000;
+                if (leadRemain <= 5) {
+                    finalizeRaceRef.current('remote');
+                }
             } else {
                 finalizeRaceRef.current('remote');
             }
@@ -1287,7 +1294,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         // 参加者スマホでは3Dもレース計算も動かさない（電池・発熱・音の重複を避ける）
         if (!isMounted || !runsSimulation) return;
 
-        const trackWidth = 44;
+        const trackWidth = 64;
         const trackLength = 1600;
 
         const scene = new THREE.Scene();
@@ -1296,8 +1303,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         sceneRef.current = scene;
 
         const camera = new THREE.PerspectiveCamera(50, 600 / 650, 0.5, 2000);
-        camera.position.set(22, 25, -28);
-        camera.lookAt(-2, 2, 4);
+        camera.position.set(10, 26, -32);
+        camera.lookAt(-8, 2, 4);
         cameraRef.current = camera;
 
         // 描画は screen / multiview のみ。幹事画面はレース計算だけ行い、WebGL を使わない。
@@ -1326,7 +1333,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         dirLight.castShadow = true;
         scene.add(dirLight);
 
-        // コース芝生グラウンド
+        // コース芝生グラウンド（幅64mのワイドコース）
         const groundMat = new THREE.MeshLambertMaterial({ map: generateTurfTexture() });
         const ground = new THREE.Mesh(new THREE.PlaneGeometry(trackWidth, trackLength), groundMat);
         ground.rotation.x = -Math.PI / 2;
@@ -1426,15 +1433,18 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             scene.add(goalBoard);
         }
 
-        // 8頭配置（コース拡大に合わせて配置幅も調整）
+        // 8頭配置（幅広の芝生に合わせて間隔をゆったり広げる）
         const meshes: HorseObject[] = [];
+        const horseSpacing = 5.8; // 馬同士の間隔をゆったり広く拡大
+        const startX = -((HORSES_DATA.length - 1) * horseSpacing) / 2; // -20.3 〜 +20.3
         HORSES_DATA.forEach((hData, i) => {
             const hObj = buildLowPolyHorse(hData);
-            const laneX = -13 + (i * 3.7);
+            const laneX = startX + (i * horseSpacing);
             hObj.baseLaneX = laneX;
             hObj.currentLaneX = laneX;
             hObj.targetLaneX = laneX;
-            hObj.progressZ = RACE_START_Z - (i * 0.8);
+            // 奇数番と偶数番で前後をずらし、バッジが重ならず綺麗に見えるように配置
+            hObj.progressZ = RACE_START_Z - ((i % 2) * 2.0) - (i * 0.4);
             hObj.mesh.position.set(laneX, 0, hObj.progressZ);
             scene.add(hObj.mesh);
             meshes.push(hObj);
@@ -1454,6 +1464,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         const badgeWorldPos = new THREE.Vector3();
         let gallopTimer = 0;
         let rankUpdateTimer = 0;
+        let finishCooldown = -1;
         let frameId = 0;
 
         const renderLoop = () => {
@@ -1502,7 +1513,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         if (scenario === 0) {
                             // パターン0: 大外一気型（本命馬が大外へコースを取る）
                             if (idx === winnerIdx) {
-                                h.targetLaneX = 7.2;
+                                h.targetLaneX = 14.0;
                                 h.currentSpeed = 1.20;
                             } else if (idx === secondIdx) {
                                 h.currentSpeed = 1.15 + deadHeatJitter;
@@ -1512,7 +1523,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         } else if (scenario === 1) {
                             // パターン1: イン強襲型（本命馬が内ラチ沿いに潜り込む）
                             if (idx === winnerIdx) {
-                                h.targetLaneX = -7.0;
+                                h.targetLaneX = -18.0;
                                 h.currentSpeed = 1.18;
                             } else if (idx === secondIdx) {
                                 h.currentSpeed = 1.16 + deadHeatJitter;
@@ -1522,10 +1533,10 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         } else if (scenario === 2) {
                             // パターン2: 2頭一騎打ち型（上位2頭が馬群を割って並びかける）
                             if (idx === winnerIdx) {
-                                h.targetLaneX = 1.8;
+                                h.targetLaneX = 3.5;
                                 h.currentSpeed = 1.22 + Math.sin(simTime * 3.0) * 0.06;
                             } else if (idx === secondIdx) {
-                                h.targetLaneX = -1.8;
+                                h.targetLaneX = -3.5;
                                 h.currentSpeed = 1.22 - Math.sin(simTime * 3.0) * 0.06;
                             } else {
                                 h.currentSpeed = baseSpeed;
@@ -1546,13 +1557,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         if (scenario === 0) {
                             // 大外から一気のゴボウ抜き！
                             if (idx === winnerIdx) {
-                                h.targetLaneX = 6.8;
+                                h.targetLaneX = 14.0;
                                 h.currentSpeed = 1.62;
                             } else if (idx === secondIdx) {
-                                h.targetLaneX = -2.0;
+                                h.targetLaneX = -4.0;
                                 h.currentSpeed = 1.30;
                             } else if (idx === thirdIdx) {
-                                h.targetLaneX = 1.0;
+                                h.targetLaneX = 4.0;
                                 h.currentSpeed = 1.20;
                             } else {
                                 h.currentSpeed = 0.94 + Math.sin(idx + simTime) * 0.04;
@@ -1560,13 +1571,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         } else if (scenario === 1) {
                             // インの内ラチ沿いから電光石火の強襲！
                             if (idx === winnerIdx) {
-                                h.targetLaneX = -6.8;
+                                h.targetLaneX = -18.0;
                                 h.currentSpeed = 1.60;
                             } else if (idx === secondIdx) {
-                                h.targetLaneX = 2.5;
+                                h.targetLaneX = 6.0;
                                 h.currentSpeed = 1.32;
                             } else if (idx === thirdIdx) {
-                                h.targetLaneX = -0.5;
+                                h.targetLaneX = -2.0;
                                 h.currentSpeed = 1.22;
                             } else {
                                 h.currentSpeed = 0.94 + Math.sin(idx + simTime) * 0.04;
@@ -1574,14 +1585,14 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         } else if (scenario === 2) {
                             // 壮絶な一騎打ち！ゴール前20mまで鼻差の叩き合い
                             if (idx === winnerIdx) {
-                                h.targetLaneX = 1.5;
+                                h.targetLaneX = 3.5;
                                 const finalPush = remain < 35 ? 0.12 : 0;
                                 h.currentSpeed = 1.46 + Math.sin(simTime * 4.5) * 0.06 + finalPush;
                             } else if (idx === secondIdx) {
-                                h.targetLaneX = -1.5;
+                                h.targetLaneX = -3.5;
                                 h.currentSpeed = 1.46 - Math.sin(simTime * 4.5) * 0.06;
                             } else if (idx === thirdIdx) {
-                                h.targetLaneX = 4.0;
+                                h.targetLaneX = 9.0;
                                 h.currentSpeed = 1.25;
                             } else {
                                 h.currentSpeed = 0.92 + Math.sin(idx + simTime) * 0.04;
@@ -1592,10 +1603,10 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                 h.targetLaneX = 0;
                                 h.currentSpeed = 1.38;
                             } else if (idx === secondIdx) {
-                                h.targetLaneX = -2.2;
+                                h.targetLaneX = -4.5;
                                 h.currentSpeed = 1.36;
                             } else if (idx === thirdIdx) {
-                                h.targetLaneX = 2.2;
+                                h.targetLaneX = 4.5;
                                 h.currentSpeed = 1.33;
                             } else {
                                 h.currentSpeed = 0.93 + Math.sin(idx + simTime) * 0.04;
@@ -1617,7 +1628,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 // 安全策：レース中なのに全馬finishedのままなら即座にスタート位置へ自己修復
                 if (meshes.length > 0 && meshes.every(m => m.finished) && !hasFinishedRef.current) {
                     meshes.forEach((h, i) => {
-                        h.progressZ = RACE_START_Z - (i * 0.8);
+                        h.progressZ = RACE_START_Z - ((i % 2) * 2.0) - (i * 0.4);
                         h.finished = false;
                         h.currentSpeed = 1.0;
                         h.currentLaneX = h.baseLaneX;
@@ -1633,6 +1644,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 }
             } else {
                 simAccumulator = 0;
+                finishCooldown = -1;
             }
 
             meshes.forEach((h, idx) => {
@@ -1706,30 +1718,37 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                     writeCommentary("ゴールイン！！大歓声の中、着順が確定しました！");
                 }
 
-                // 全頭ゴール → 1回だけ確定処理（statusRef も即時更新して次フレームで再発火しない）
-                if (!hasFinishedRef.current && meshes.every(m => m.finished)) {
+                // 先頭馬がゴール板を通過したら余韻タイマー（2.5秒）を開始
+                if (leadHorse.progressZ <= FINISH_Z && finishCooldown < 0) {
+                    finishCooldown = 2.5; // 2.5秒間、ゴール通過の興奮と全馬の駆け抜けを映す
+                }
+                if (finishCooldown >= 0) {
+                    finishCooldown -= delta;
+                }
+
+                // 先頭ゴール後、全頭ゴールまたは余韻終了で正式確定（途中で勝手に終わらない！）
+                if (!hasFinishedRef.current && finishCooldown >= 0 && (finishCooldown <= 0 || meshes.every(m => m.finished))) {
                     statusRef.current = 'result';
                     finalizeRaceRef.current('local');
                 }
             }
 
-            // カメラ制御（Vector3 を毎フレーム new しない）
+            // カメラ制御（右側HUDと被らないよう、画面中央の有効領域にレースをセンタリング）
             const targetPos = leadHorse.mesh.position;
-            // lerp係数をフレームレート非依存に
             const camLerp = 1 - Math.pow(1 - 0.08, delta * 60);
             if (currentCam === 'follow') {
-                camera.position.lerp(camTarget.set(targetPos.x + 14, targetPos.y + 11, targetPos.z + 32), camLerp);
-                camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z - 10);
+                camera.position.lerp(camTarget.set(targetPos.x + 14, targetPos.y + 13, targetPos.z + 36), camLerp);
+                camera.lookAt(targetPos.x + 5, targetPos.y + 2, targetPos.z - 10);
             } else if (currentCam === 'side') {
-                camera.position.lerp(camTarget.set(targetPos.x + 32, targetPos.y + 6, targetPos.z - 2), camLerp);
-                camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
+                camera.position.lerp(camTarget.set(targetPos.x + 42, targetPos.y + 8, targetPos.z - 2), camLerp);
+                camera.lookAt(targetPos.x + 6, targetPos.y + 2, targetPos.z);
             } else if (currentCam === 'front') {
-                camera.position.lerp(camTarget.set(targetPos.x, targetPos.y + 5, targetPos.z - 32), camLerp);
-                camera.lookAt(targetPos.x, targetPos.y + 2, targetPos.z);
+                camera.position.lerp(camTarget.set(targetPos.x + 6, targetPos.y + 6, targetPos.z - 36), camLerp);
+                camera.lookAt(targetPos.x + 6, targetPos.y + 2, targetPos.z);
             } else {
-                // 俯瞰：右斜め前の角度で上から見下ろし、全頭を1画面で追えるようにする
-                camera.position.lerp(camTarget.set(targetPos.x + 22, 25, targetPos.z - 28), camLerp);
-                camera.lookAt(targetPos.x - 2, 2, targetPos.z + 4);
+                // 俯瞰（デフォルト）：右斜め前からの俯瞰アングル。全頭とワイドな芝生が画面中央に堂々と収まるセンタリング
+                camera.position.lerp(camTarget.set(targetPos.x + 10, 26, targetPos.z - 32), camLerp);
+                camera.lookAt(targetPos.x - 8, 2, targetPos.z + 4);
             }
 
             // スクリーン枠が表示されている時だけ描画（非表示中もレース進行は継続）
@@ -1787,13 +1806,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             body: JSON.stringify({ type: 'update_game', status: 'racing', currentRaceIndex, correctOrder })
         }).catch(err => console.error("Start race DB error:", err));
 
-        // 保険：幹事タブが裏に回り、スクリーンからのゴール通知も届かない場合でも45秒で確定（通常は約26秒でゴール）
+        // 保険：スクリーンからのゴール通知が届かない場合でも65秒で確定（通常は約28〜32秒でゴール）
         const raceAtStart = currentRaceIndex;
         window.setTimeout(() => {
             if (statusRef.current === 'racing' && raceIndexRef.current === raceAtStart) {
                 finalizeRaceRef.current('local');
             }
-        }, 45000);
+        }, 65000);
     }, [currentRaceIndex, correctOrder, resetHorsePositions, broadcastGameState]);
 
     const goToRace = useCallback((idx: number, broadcast: boolean) => {
