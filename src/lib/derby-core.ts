@@ -134,12 +134,9 @@ export function createSimState(): SimState {
  * レース番号と正解着順から決まる（サーバー・全画面で同じ結果になる）。順番に並ぶのではなく、毎回違う顔ぶれになる
  */
 export const SCENARIO_COUNT = 8;
-export const scenarioOf = (raceIndex: number, order?: readonly number[]): number => {
+export const scenarioOf = (raceIndex: number, _order?: readonly number[]): number => {
   const r = Math.abs(raceIndex || 0);
-  const o = order && order.length >= 3 ? order : [0, 1, 2];
-  let h = Math.imul(r + 1, 2654435761) ^ Math.imul(o[0] + 1, 40503) ^ Math.imul(o[1] + 11, 9973) ^ Math.imul(o[2] + 31, 1299709);
-  h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13; h = Math.imul(h, 3266489917); h ^= h >>> 16;
-  return (h >>> 0) % SCENARIO_COUNT;
+  return r % SCENARIO_COUNT;
 };
 
 /** 実況テロップ（パターン別：直線入口／残り200m） */

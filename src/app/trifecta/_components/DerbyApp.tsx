@@ -825,7 +825,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         finishPole.position.set(-trackWidth / 2 - 1, 8, FINISH_Z);
         scene.add(finishPole);
 
-        // 残り距離標識（壁側・右斜め前の俯瞰から特大でハッキリ読めるサイズ）
+        // 残り距離標識（壁側・右斜め前の俯瞰から正面に見える角度・文字切れのない特大サイズ）
         const wallCourseX = -trackWidth / 2 - 0.8;
         [1000, 800, 600, 400, 200, 100].forEach(dist => {
             const cv = document.createElement('canvas');
@@ -835,31 +835,43 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             // 白地パネル ＋ 太い赤枠線
             c2.fillStyle = '#ffffff';
             c2.fillRect(0, 0, 512, 256);
-            c2.lineWidth = 20;
+            c2.lineWidth = 16;
             c2.strokeStyle = '#dc2626';
-            c2.strokeRect(10, 10, 492, 236);
+            c2.strokeRect(8, 8, 496, 240);
 
-            // 残り距離 数字（特大）
+            // 残り距離 数字（文字切れ防止：枠内に必ず収まるよう動的フィット）
+            const distStr = String(dist);
+            let numFontSize = dist >= 1000 ? 112 : 128;
+            c2.font = `900 ${numFontSize}px "Impact", "Arial Black", sans-serif`;
+            while (c2.measureText(distStr).width > 420 && numFontSize > 60) {
+                numFontSize -= 4;
+                c2.font = `900 ${numFontSize}px "Impact", "Arial Black", sans-serif`;
+            }
             c2.fillStyle = '#dc2626';
-            c2.font = '900 136px "Impact", "Arial Black", sans-serif';
             c2.textAlign = 'center';
             c2.textBaseline = 'middle';
-            c2.fillText(String(dist), 256, 104);
+            c2.fillText(distStr, 256, 100);
 
-            // "残り" ＋ "m" サブテキスト
+            // "残り" ＋ "m" サブテキスト（中央配置）
+            let subFontSize = 44;
+            c2.font = `bold ${subFontSize}px sans-serif`;
+            const subText = `残り ${dist}m`;
+            while (c2.measureText(subText).width > 430 && subFontSize > 24) {
+                subFontSize -= 2;
+                c2.font = `bold ${subFontSize}px sans-serif`;
+            }
             c2.fillStyle = '#0f172a';
-            c2.font = 'bold 50px sans-serif';
-            c2.fillText(`残り ${dist}m`, 256, 204);
+            c2.fillText(subText, 256, 195);
 
-            // 看板サイズを従来の2倍以上（11.5m x 5.75m）に拡大して視認性を劇的に向上
-            const board = new THREE.Mesh(new THREE.PlaneGeometry(11.5, 5.75), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), side: THREE.DoubleSide }));
-            board.position.set(wallCourseX, 7.8, FINISH_Z + dist);
-            board.rotation.y = Math.PI * 0.45;
+            // 右斜め前カメラ (26, 38, -48) からしっかり正対して見える角度（Math.PI * 0.27）
+            const board = new THREE.Mesh(new THREE.PlaneGeometry(10.5, 5.25), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), side: THREE.DoubleSide }));
+            board.position.set(wallCourseX, 8.2, FINISH_Z + dist);
+            board.rotation.y = Math.PI * 0.27;
 
             const arm = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.4, 0.4), new THREE.MeshLambertMaterial({ color: 0x334155 }));
-            arm.position.set(wallCourseX - 0.8, 7.8, FINISH_Z + dist);
-            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 8, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }));
-            post.position.set(wallCourseX + 0.1, 4, FINISH_Z + dist);
+            arm.position.set(wallCourseX - 0.8, 8.2, FINISH_Z + dist);
+            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 8.5, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+            post.position.set(wallCourseX + 0.1, 4.25, FINISH_Z + dist);
             scene.add(board, arm, post);
         });
 
@@ -883,7 +895,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             gc.fillText('FINISH LINE', 256, 208);
             const goalBoard = new THREE.Mesh(new THREE.PlaneGeometry(12, 6), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(goalCv), side: THREE.DoubleSide }));
             goalBoard.position.set(wallCourseX, 10, FINISH_Z);
-            goalBoard.rotation.y = Math.PI * 0.45;
+            goalBoard.rotation.y = Math.PI * 0.27;
             scene.add(goalBoard);
         }
 
@@ -1548,17 +1560,28 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
                                 {/* 上部オーバーレイ：左＝レース名（特大）、右＝残り距離・投票数／順位ボード */}
                                 <div className="absolute top-0 inset-x-0 p-3 sm:p-5 z-20 flex items-start justify-between pointer-events-none">
-                                    {/* 左上：レースの名前をもっとでかく */}
+                                    {/* 左上：レースの名前（改行せず文字サイズで調整・途切れない） */}
                                     <div className="flex flex-col gap-2 pointer-events-auto">
                                         <div className="bg-slate-950/90 backdrop-blur-md border-2 border-amber-500/60 rounded-2xl px-5 py-3.5 shadow-2xl font-mono flex items-center gap-3.5 max-w-lg">
                                             <span className="text-3xl sm:text-4xl shrink-0">🏇</span>
-                                            <div className="min-w-0">
+                                            <div className="min-w-0 flex-1">
                                                 <div className="text-xs sm:text-sm text-amber-400 font-black tracking-widest uppercase">
                                                     RACE {currentRaceIndex + 1} / 全{races.length}R
                                                 </div>
-                                                <div className="text-xl sm:text-2xl lg:text-3xl font-black text-white truncate drop-shadow leading-tight mt-0.5">
-                                                    {currentRace.name}
-                                                </div>
+                                                {(() => {
+                                                    const nameLen = (currentRace.name || '').length;
+                                                    const nameSizeClass =
+                                                        nameLen > 24 ? 'text-xs sm:text-sm' :
+                                                        nameLen > 18 ? 'text-sm sm:text-base' :
+                                                        nameLen > 13 ? 'text-base sm:text-lg lg:text-xl' :
+                                                        nameLen > 8  ? 'text-lg sm:text-xl lg:text-2xl' :
+                                                        'text-xl sm:text-2xl lg:text-3xl';
+                                                    return (
+                                                        <div className={`font-black text-white whitespace-nowrap drop-shadow leading-tight mt-0.5 ${nameSizeClass}`}>
+                                                            {currentRace.name}
+                                                        </div>
+                                                    );
+                                                })()}
                                                 <div className="text-xs sm:text-sm text-amber-200/90 font-bold truncate mt-1">
                                                     {currentRace.question}
                                                 </div>
@@ -1645,10 +1668,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                         <div className="my-1 sm:my-2 w-full">
                                                             <div className="text-base sm:text-lg lg:text-xl font-black text-white leading-snug break-words px-1">{currentRace.options[hIdx]}</div>
                                                         </div>
-                                                        <div className="mt-2 pt-2 border-t border-slate-800/80 w-full flex items-center justify-center gap-3 font-mono">
-                                                            <span className="text-[10px] sm:text-xs text-slate-400">投票数</span>
-                                                            <span className={`text-base sm:text-xl font-black ${st.accent}`}>{odds.counts[hIdx] ?? 0}票</span>
-                                                        </div>
                                                     </div>
                                                 );
                                             })}
@@ -1686,7 +1705,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             <h1 className="text-3xl sm:text-4xl lg:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wider drop-shadow">
                                                 結果発表
                                             </h1>
-                                            <p className="text-xs sm:text-sm text-slate-400">これまでの累計ポイント</p>
                                         </div>
 
                                         <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
