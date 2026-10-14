@@ -127,15 +127,42 @@ export function createSimState(): SimState {
   };
 }
 
-/** レースごとの演出パターン（大外一気／イン強襲／一騎打ち／逃げ粘り） */
-export const scenarioOf = (raceIndex: number) => Math.abs(raceIndex || 0) % 4;
+/**
+ * レースごとの演出パターン（8種類）
+ * 0 大外一気 / 1 イン強襲 / 2 一騎打ち / 3 逃げ粘り
+ * 4 最後方からの一気差し / 5 内外の叩き合い / 6 4頭横一線の写真判定 / 7 直線入口で先頭交代
+ * レース番号と正解着順から決まる（サーバー・全画面で同じ結果になる）。順番に並ぶのではなく、毎回違う顔ぶれになる
+ */
+export const SCENARIO_COUNT = 8;
+export const scenarioOf = (raceIndex: number, order?: readonly number[]): number => {
+  const r = Math.abs(raceIndex || 0);
+  const o = order && order.length >= 3 ? order : [0, 1, 2];
+  let h = Math.imul(r + 1, 2654435761) ^ Math.imul(o[0] + 1, 40503) ^ Math.imul(o[1] + 11, 9973) ^ Math.imul(o[2] + 31, 1299709);
+  h ^= h >>> 15; h = Math.imul(h, 2246822519); h ^= h >>> 13; h = Math.imul(h, 3266489917); h ^= h >>> 16;
+  return (h >>> 0) % SCENARIO_COUNT;
+};
+
+/** 実況テロップ（パターン別：直線入口／残り200m） */
+export const SCENARIO_COMMENTARY: { mid: string; late: string }[] = [
+  { mid: "第4コーナー！後方から大外へ持ち出した！", late: "残り200m！大外一気！豪快な末脚が炸裂したー！！" },
+  { mid: "第4コーナー！インコース内ラチ沿いに潜り込む！", late: "残り200m！内から一閃！最短コースを電光石火で突き抜ける！" },
+  { mid: "2頭が抜け出した！壮絶な一騎打ちの様相！", late: "残り200m！叩き合い！並んだ！ハナ差の壮絶なデッドヒート！！" },
+  { mid: "直線コースへ！先頭集団が意地と意地のぶつかり合い！", late: "残り200m！必死の二枚腰！逃げ切れるか！迫る追撃！！" },
+  { mid: "最後方に控えていた馬が、ここから動いた！", late: "残り200m！最後方から猛追！前の馬群をまとめて飲み込む勢い！！" },
+  { mid: "内と外、2頭が馬体を離して並んで来た！", late: "残り200m！内か外か！ぴったり並んで一歩も譲らない！！" },
+  { mid: "4頭が横一線！どの馬が抜け出すのか！", late: "残り200m！4頭が横一線！これは写真判定になるかー！？" },
+  { mid: "先頭は競り合いのまま直線へ！外から並びかけた！", late: "残り200m！先頭が入れ替わった！内の馬が差し返せるか！？" }
+];
 
 /** 1ステップ進める（order = 幹事が指定した正解着順） */
 export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
   const dt = SIM_STEP;
   const simTime = s.t;
-  const scenario = scenarioOf(raceIndex);
+  const scenario = scenarioOf(raceIndex, order);
   const [winnerIdx, secondIdx, thirdIdx] = order;
+  // 入着しない馬のうち1頭を「食らいつく4番手」にする（写真判定パターン用。着順の組み合わせで決まる）
+  const others = Array.from({ length: OPTION_COUNT }, (_, i) => i).filter(i => !order.includes(i));
+  const fourthIdx = others[(winnerIdx + secondIdx * 2 + thirdIdx * 3) % others.length];
 
   s.horses.forEach((h, idx) => {
     if (h.finished) return;
@@ -150,6 +177,8 @@ export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
       // 序盤：全馬が激しく競り合い
       const base = 1.05 + jitter;
       if (scenario === 3 && idx === winnerIdx) h.speed = 1.18 + jitter; // 逃げパターン
+      else if (scenario === 4 && idx === winnerIdx) h.speed = Math.max(0.9, 0.97 + jitter * 0.4); // 後方で脚をためる
+      else if (scenario === 7 && idx === secondIdx) h.speed = 1.17 + jitter * 0.5; // 先頭に立つ2着馬
       else h.speed = Math.max(0.88, Math.min(1.25, base));
     } else if (remain > 280) {
       // 中盤：馬群が凝縮
@@ -166,9 +195,29 @@ export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
         if (idx === winnerIdx) { h.targetLaneX = 3.5; h.speed = 1.22 + Math.sin(simTime * 3.0) * 0.06; }
         else if (idx === secondIdx) { h.targetLaneX = -3.5; h.speed = 1.22 - Math.sin(simTime * 3.0) * 0.06; }
         else h.speed = base;
-      } else {
+      } else if (scenario === 3) {
         if (idx === winnerIdx) h.speed = 1.16 + Math.sin(simTime * 2.0) * 0.05;
         else if (idx === secondIdx || idx === thirdIdx) h.speed = 1.18 + jitter;
+        else h.speed = base;
+      } else if (scenario === 4) {
+        // 最後方待機：1着馬だけ外を回らず後ろに控える
+        if (idx === winnerIdx) { h.targetLaneX = 2.0; h.speed = 1.00 + Math.sin(simTime * 2.2) * 0.02; }
+        else if (idx === secondIdx || idx === thirdIdx) h.speed = 1.14 + jitter * 0.6;
+        else h.speed = base;
+      } else if (scenario === 5) {
+        // 内と外に分かれて前を窺う
+        if (idx === winnerIdx) { h.targetLaneX = -10.0; h.speed = 1.17 + Math.sin(simTime * 2.6) * 0.03; }
+        else if (idx === secondIdx) { h.targetLaneX = 10.0; h.speed = 1.17 - Math.sin(simTime * 2.6) * 0.03; }
+        else h.speed = base;
+      } else if (scenario === 6) {
+        // 上位3頭＋食らいつく1頭が並走
+        if (idx === winnerIdx || idx === secondIdx || idx === thirdIdx || idx === fourthIdx) h.speed = 1.17 + Math.sin(simTime * 2.4 + idx) * 0.03;
+        else h.speed = base;
+      } else {
+        // 7：2着馬が先頭、1着馬は外から追走
+        if (idx === secondIdx) { h.targetLaneX = -6.0; h.speed = 1.17; }
+        else if (idx === winnerIdx) { h.targetLaneX = 8.0; h.speed = 1.13; }
+        else if (idx === thirdIdx) h.speed = 1.14 + jitter * 0.5;
         else h.speed = base;
       }
     } else {
@@ -189,11 +238,36 @@ export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
         else if (idx === secondIdx) { h.targetLaneX = -3.5; h.speed = 1.46 - Math.sin(simTime * 4.5) * 0.06; }
         else if (idx === thirdIdx) { h.targetLaneX = 9.0; h.speed = 1.25; }
         else h.speed = 0.92 + Math.sin(idx + simTime) * 0.04;
-      } else {
+      } else if (scenario === 3) {
         if (idx === winnerIdx) { h.targetLaneX = 0; h.speed = 1.38; }
         else if (idx === secondIdx) { h.targetLaneX = -4.5; h.speed = 1.36; }
         else if (idx === thirdIdx) { h.targetLaneX = 4.5; h.speed = 1.33; }
         else h.speed = 0.93 + Math.sin(idx + simTime) * 0.04;
+      } else if (scenario === 4) {
+        if (idx === winnerIdx) { h.targetLaneX = 6.0; h.speed = 1.82; }
+        else if (idx === secondIdx) { h.targetLaneX = -5.0; h.speed = 1.30; }
+        else if (idx === thirdIdx) { h.targetLaneX = 2.0; h.speed = 1.22; }
+        else h.speed = tail;
+      } else if (scenario === 5) {
+        if (idx === winnerIdx) { h.targetLaneX = -9.0; h.speed = 1.46 + Math.sin(simTime * 5.0) * 0.05 + (remain < 30 ? 0.10 : 0); }
+        else if (idx === secondIdx) { h.targetLaneX = 9.0; h.speed = 1.46 - Math.sin(simTime * 5.0) * 0.05; }
+        else if (idx === thirdIdx) { h.targetLaneX = 0.0; h.speed = 1.24; }
+        else h.speed = tail;
+      } else if (scenario === 6) {
+        // 4頭が横一線（食らいつく4番手は、ゴール前で着順補正により半馬身遅れる）
+        const lanes = [-6.5, -2.2, 2.2, 6.5];
+        const slot = (winnerIdx + secondIdx) % 2 === 0 ? [1, 2, 0, 3] : [2, 1, 3, 0]; // 組み合わせで並び方が変わる
+        if (idx === winnerIdx) { h.targetLaneX = lanes[slot[0]]; h.speed = 1.42 + (remain < 40 ? 0.10 : 0); }
+        else if (idx === secondIdx) { h.targetLaneX = lanes[slot[1]]; h.speed = 1.42; }
+        else if (idx === thirdIdx) { h.targetLaneX = lanes[slot[2]]; h.speed = 1.40; }
+        else if (idx === fourthIdx) { h.targetLaneX = lanes[slot[3]]; h.speed = 1.41; }
+        else h.speed = tail;
+      } else {
+        // 7：直線入口で、外から来た1着馬が先頭を奪う
+        if (idx === winnerIdx) { h.targetLaneX = 1.0; h.speed = 1.62; }
+        else if (idx === secondIdx) { h.targetLaneX = -7.0; h.speed = 1.38; }
+        else if (idx === thirdIdx) { h.targetLaneX = -2.5; h.speed = 1.26; }
+        else h.speed = tail;
       }
     }
 
@@ -244,7 +318,7 @@ export function advanceSimTo(s: SimState, targetT: number, order: BetOrder, race
 const durationCache = new Map<string, number>();
 /** 発走から着順確定までのミリ秒（サーバーと画面で同じ値になる） */
 export function computeRaceDurationMs(order: BetOrder, raceIndex: number): number {
-  const key = `${order.join(',')}|${scenarioOf(raceIndex)}|${raceIndex}`;
+  const key = `${order.join(',')}|${scenarioOf(raceIndex, order)}|${raceIndex}`;
   const cached = durationCache.get(key);
   if (cached !== undefined) return cached;
   const s = createSimState();

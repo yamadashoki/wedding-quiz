@@ -137,6 +137,24 @@ async function recomputeTotals(sb: Supabase) {
  * 着順確定（冪等）：status が racing の時だけ result に切り替え、勝った1回だけ採点する。
  * 同時に複数の画面から呼ばれても二重採点しない。
  */
+/** 発走後は、発走時刻より後に保存された馬券を数えない（全画面・採点で同じ投票者になる） */
+function isCountedBet(createdAt: string | null | undefined, raceStartedAt: string | null | undefined): boolean {
+    if (!raceStartedAt || !createdAt) return true;
+    return new Date(createdAt).getTime() <= new Date(raceStartedAt).getTime();
+}
+
+/** 現在レースの全馬券を、指定した正解着順で採点し直す（累計の再計算は呼び出し側で行う） */
+async function scoreCurrentRace(sb: Supabase, game: GameRow, order: BetOrder): Promise<void> {
+    const { data: bets, error: betErr } = await sb.from("derby_bets").select("*")
+        .eq("game_id", GAME_ID).eq("race_index", game.current_race_index);
+    if (betErr) dbFail("馬券の取得", betErr);
+    const scored = ((bets ?? []) as BetRow[]).filter(b => isCountedBet(b.created_at, game.race_started_at)).map(b => ({ ...b, score_gained: judgeBet(b.bet_order, order).score }));
+    if (scored.length > 0) {
+        const { error: upErr } = await sb.from("derby_bets").upsert(scored);
+        if (upErr) dbFail("採点の保存", upErr);
+    }
+}
+
 async function finalizeIfDue(sb: Supabase, game: GameRow, toleranceMs: number): Promise<boolean> {
     if (game.status !== 'racing' || !game.race_started_at) return false;
     const due = new Date(game.race_started_at).getTime() + computeRaceDurationMs(game.correct_order, game.current_race_index);
@@ -149,15 +167,7 @@ async function finalizeIfDue(sb: Supabase, game: GameRow, toleranceMs: number): 
     if (error) dbFail("着順確定", error);
     if (!won || won.length === 0) return false; // 他の画面が先に確定済み
 
-    // 現在レースの全馬券を採点
-    const { data: bets, error: betErr } = await sb.from("derby_bets").select("*")
-        .eq("game_id", GAME_ID).eq("race_index", game.current_race_index);
-    if (betErr) dbFail("馬券の取得", betErr);
-    const scored = ((bets ?? []) as BetRow[]).map(b => ({ ...b, score_gained: judgeBet(b.bet_order, game.correct_order).score }));
-    if (scored.length > 0) {
-        const { error: upErr } = await sb.from("derby_bets").upsert(scored);
-        if (upErr) dbFail("採点の保存", upErr);
-    }
+    await scoreCurrentRace(sb, game, game.correct_order);
     await recomputeTotals(sb);
     return true;
 }
@@ -172,11 +182,14 @@ async function buildSnapshot(sb: Supabase, host: boolean) {
     const raceIdx = Math.min(game.current_race_index, Math.max(0, races.length - 1));
     const [ps, bets] = await Promise.all([
         sb.from("derby_participants").select("id, name, score").order("score", { ascending: false }),
-        sb.from("derby_bets").select("participant_id, bet_order").eq("game_id", GAME_ID).eq("race_index", raceIdx)
+        sb.from("derby_bets").select("participant_id, bet_order, created_at").eq("game_id", GAME_ID).eq("race_index", raceIdx)
     ]);
     if (ps.error) dbFail("参加者の取得", ps.error);
     if (bets.error) dbFail("馬券の取得", bets.error);
-    const betMap = new Map((bets.data ?? []).map(b => [b.participant_id, b.bet_order as number[]]));
+    const frozenAt = game.status !== 'idle' ? game.race_started_at : null;
+    const betMap = new Map((bets.data ?? [])
+        .filter(b => isCountedBet(b.created_at, frozenAt))
+        .map(b => [b.participant_id, b.bet_order as number[]]));
 
     const revealOrder = host || game.status !== 'idle';
     const startedAt = game.race_started_at ? new Date(game.race_started_at).getTime() : null;
@@ -269,6 +282,15 @@ export async function POST(request: NextRequest) {
                 participant_name: name, bet_order: betOrder, score_gained: 0
             });
             if (betErr && betErr.code !== '23505') dbFail("投票の保存", betErr);
+            if (!betErr) {
+                // 「受付中の確認」と「保存」の間に発走された場合は、この投票を取り消す（画面ごとに的中者数がずれるのを防ぐ）
+                const after = await getGame(sb);
+                if (after.status !== 'idle' || after.race_started_at || after.current_race_index !== raceIndex) {
+                    await sb.from("derby_bets").delete()
+                        .eq("game_id", GAME_ID).eq("race_index", raceIndex).eq("participant_id", participantId);
+                    throw new ApiError(409, "このレースの投票受付は終了しています");
+                }
+            }
             return ok(await buildSnapshot(sb, host), { duplicate: betErr?.code === '23505' });
         }
 
@@ -305,7 +327,9 @@ export async function POST(request: NextRequest) {
         }
 
         if (type === 'set_correct_order') {
-            notRacing();
+            // 受付中・結果確定後のどちらでも変更できる。結果確定後は、このレースの得点を新しい着順で付け直す
+            if (game.status === 'racing') throw new ApiError(409, "レース中は変更できません。着順が確定してから変更してください");
+            if (game.status === 'grand_finale') throw new ApiError(409, "表彰画面を閉じてから変更してください");
             const { correctOrder } = body;
             if (!isValidOrder(correctOrder)) throw new ApiError(400, "正解着順は重複なしで3つ選んでください");
             await updateGame(sb, { correct_order: correctOrder });
@@ -313,6 +337,10 @@ export async function POST(request: NextRequest) {
             if (race) {
                 const { error } = await sb.from("derby_races").update({ correct_order: correctOrder, updated_at: nowIso() }).eq("id", race.id);
                 if (error) dbFail("正解着順の保存", error);
+            }
+            if (game.status === 'result') {
+                await scoreCurrentRace(sb, game, correctOrder);
+                await recomputeTotals(sb);
             }
             return ok(await buildSnapshot(sb, true));
         }

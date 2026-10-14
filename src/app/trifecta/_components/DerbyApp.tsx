@@ -27,20 +27,6 @@ const IconBase = ({ className, children }: IconProps & { children: React.ReactNo
         {children}
     </svg>
 );
-const Volume2 = (p: IconProps) => (
-    <IconBase {...p}>
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-        <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-        <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-    </IconBase>
-);
-const VolumeX = (p: IconProps) => (
-    <IconBase {...p}>
-        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-        <line x1="23" y1="9" x2="17" y2="15" />
-        <line x1="17" y1="9" x2="23" y2="15" />
-    </IconBase>
-);
 const Smartphone = (p: IconProps) => (
     <IconBase {...p}>
         <rect x="5" y="2" width="14" height="20" rx="2" />
@@ -168,12 +154,6 @@ export interface DerbyAppProps {
     basePath?: string;
 }
 
-interface WindowWithExtras {
-    webkitAudioContext?: typeof AudioContext;
-}
-const getWin = () => window as unknown as Window & WindowWithExtras;
-
-const INITIAL_COMMENTARY = '各馬ゲートイン完了！まもなく発走です！';
 const HOST_PW_KEY = 'derby_host_password';
 
 const HORSES_DATA: HorseData[] = [
@@ -205,97 +185,6 @@ const RANK_STYLE: Record<BetRankType, { solid: string; soft: string; emoji: stri
 };
 
 const CLOSED_DIALOG: ConfirmDialogState = { isOpen: false, title: '', message: '', onConfirm: null };
-
-// ==============================================================
-// Web Audio API による合成音響エンジン（音声ファイル不要）
-// ==============================================================
-class SoundSynthesizer {
-    ctx: AudioContext | null = null;
-    muted = false;
-
-    init() {
-        if (typeof window === 'undefined') return;
-        if (!this.ctx) {
-            const AudioCtx = window.AudioContext || getWin().webkitAudioContext;
-            if (AudioCtx) this.ctx = new AudioCtx();
-        }
-        if (this.ctx && this.ctx.state === 'suspended') {
-            void this.ctx.resume();
-        }
-    }
-    playFanfare() {
-        if (this.muted) return;
-        this.init();
-        const ctx = this.ctx;
-        if (!ctx) return;
-        const notes = [
-            { f: 523.25, d: 0.14, t: 0 },
-            { f: 523.25, d: 0.14, t: 0.15 },
-            { f: 523.25, d: 0.14, t: 0.3 },
-            { f: 659.25, d: 0.35, t: 0.45 },
-            { f: 783.99, d: 0.35, t: 0.8 },
-            { f: 659.25, d: 0.2, t: 1.15 },
-            { f: 783.99, d: 0.6, t: 1.35 },
-            { f: 1046.50, d: 0.8, t: 1.95 }
-        ];
-        notes.forEach(n => {
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.type = 'triangle';
-            osc.frequency.setValueAtTime(n.f, ctx.currentTime + n.t);
-            gain.gain.setValueAtTime(0.001, ctx.currentTime + n.t);
-            gain.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + n.t + 0.03);
-            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + n.t + n.d);
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start(ctx.currentTime + n.t);
-            osc.stop(ctx.currentTime + n.t + n.d);
-        });
-    }
-    playCheers() {
-        if (this.muted) return;
-        this.init();
-        const ctx = this.ctx;
-        if (!ctx) return;
-        const bufferSize = ctx.sampleRate * 2.0;
-        const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-        const output = buffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) {
-            output[i] = Math.random() * 2 - 1;
-        }
-        const whiteNoise = ctx.createBufferSource();
-        whiteNoise.buffer = buffer;
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'bandpass';
-        filter.frequency.value = 850;
-        filter.Q.value = 1.0;
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.01, ctx.currentTime);
-        gain.gain.linearRampToValueAtTime(0.12, ctx.currentTime + 0.5);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 2.0);
-        whiteNoise.connect(filter);
-        filter.connect(gain);
-        gain.connect(ctx.destination);
-        whiteNoise.start();
-    }
-    playGallop() {
-        if (this.muted) return;
-        this.init();
-        const ctx = this.ctx;
-        if (!ctx) return;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(140, ctx.currentTime);
-        osc.frequency.exponentialRampToValueAtTime(40, ctx.currentTime + 0.08);
-        gain.gain.setValueAtTime(0.06, ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.08);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start();
-        osc.stop(ctx.currentTime + 0.08);
-    }
-}
 
 // ==============================================================
 // 3D 素材（すべてコード生成。外部モデル・画像なし）
@@ -360,7 +249,6 @@ function generateTurfTexture(): THREE.CanvasTexture | null {
     cv.height = 128;
     const ctx = cv.getContext("2d");
     if (!ctx) return null;
-    // 濃淡2色の刈り込み縞（コース進行方向に流れて見えるので「走っている感」が出る）
     ctx.fillStyle = "#2d7a38";
     ctx.fillRect(0, 0, 128, 64);
     ctx.fillStyle = "#3b9147";
@@ -372,7 +260,7 @@ function generateTurfTexture(): THREE.CanvasTexture | null {
     const tex = new THREE.CanvasTexture(cv);
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(2, 60); // 縞1本 = 10m
+    tex.repeat.set(2, 60);
     return tex;
 }
 
@@ -401,7 +289,6 @@ function generateStandWallTexture(): THREE.CanvasTexture | null {
 
 function buildLowPolyHorse(horseData: HorseData): HorseObject {
     const group = new THREE.Group();
-    // 遠くからでもはっきり見えるように馬のモデルを1.5倍に拡大
     group.scale.set(1.5, 1.5, 1.5);
 
     const horseMat = new THREE.MeshLambertMaterial({ color: 0x854d24 });
@@ -510,7 +397,6 @@ function createTrackFence(xPos: number, trackLength: number): THREE.Group {
     topRail.position.set(xPos, 1.1, -trackLength / 2 + 100);
     fenceGroup.add(topRail);
 
-    // 支柱は InstancedMesh で1ドローコールにまとめる（数百メッシュによるfps低下を防止）
     const postCount = Math.floor(trackLength / 6) + 1;
     const posts = new THREE.InstancedMesh(postGeo, postMat, postCount);
     const m = new THREE.Matrix4();
@@ -525,11 +411,6 @@ function createTrackFence(xPos: number, trackLength: number): THREE.Group {
 
 // ==============================================================
 // 本体
-// 同期の考え方（「リロードしないと進まない」対策）
-//   ・進行状態は DB だけが正。どの画面も /api/trifecta の同じスナップショットを表示する
-//   ・リアルタイム配信は「更新があったよ」の合図だけ。取りこぼしても 2.5〜4 秒ごとの再取得で必ず追いつく
-//   ・レース映像は「発走時刻（サーバー時刻）からの経過秒」で決まる。途中から開いたスクリーンも同じ位置から映る
-//   ・着順確定はゴール時刻を過ぎたらサーバーが行う（スクリーン・幹事・誰かの再取得のどれか1つが届けば進む）
 // ==============================================================
 export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath = '/trifecta' }: DerbyAppProps) {
     const isHostRole = role === 'host' || role === 'multiview';
@@ -565,31 +446,26 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const [loginInput, setLoginInput] = useState('');
     const [loginError, setLoginError] = useState<string | null>(null);
     const [hostBusy, setHostBusy] = useState(false);
-    const [draftRaces, setDraftRaces] = useState<DerbyRace[] | null>(null); // 問題登録の下書き（保存するまで本番に影響しない）
+    const [draftRaces, setDraftRaces] = useState<DerbyRace[] | null>(null);
     const [editRaceIndex, setEditRaceIndex] = useState(0);
 
     // ---- 表示 ----
     const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(CLOSED_DIALOG);
     const [toastMessage, setToastMessage] = useState<string | null>(null);
-    const [isMuted, setIsMuted] = useState(role === 'host' || role === 'play'); // 音は会場スクリーンから出す
     const [realtimeRanks, setRealtimeRanks] = useState<number[]>([0, 1, 2, 3, 4, 5, 6, 7]);
-    const [audioUnlocked, setAudioUnlocked] = useState(false);
     const [webglError, setWebglError] = useState(false);
     const [origin, setOrigin] = useState('');
     const [isCloudConnected, setIsCloudConnected] = useState(false);
-    const [localFinishedKey, setLocalFinishedKey] = useState<string | null>(null); // スクリーンが自分の映像でゴールしたレース
-    const [nowTick, setNowTick] = useState(0); // 幹事画面のカウントダウン用
+    const [localFinishedKey, setLocalFinishedKey] = useState<string | null>(null);
+    const [nowTick, setNowTick] = useState(0);
 
     // ---- Three.js ----
     const containerElRef = useRef<HTMLDivElement | null>(null);
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-    const soundRef = useRef<SoundSynthesizer | null>(null);
     const remainElRef = useRef<HTMLSpanElement | null>(null);
-    const commentaryElRef = useRef<HTMLSpanElement | null>(null);
     const lastRemainRef = useRef(1000);
-    const lastCommentaryRef = useRef(INITIAL_COMMENTARY);
 
     // ---- 最新値を非同期処理・描画ループから読むための Ref ----
     const raceKey = `${currentRaceIndex}:${raceStartedAt ?? '-'}`;
@@ -601,7 +477,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const raceKeyRef = useRef(raceKey);
     const hostPasswordRef = useRef('');
     const versionRef = useRef(0);
-    const clockOffsetRef = useRef(0);      // サーバー時刻 − 端末時刻
+    const clockOffsetRef = useRef(0);
     const bestRttRef = useRef(Infinity);
     const localFinishedRef = useRef<string | null>(null);
     const onLocalFinishRef = useRef<(key: string) => void>(() => { });
@@ -617,7 +493,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const serverNow = useCallback(() => Date.now() + clockOffsetRef.current, []);
 
     // --------------------------------------------------------------
-    // スナップショットの反映（古い応答で新しい状態を巻き戻さない）
+    // スナップショットの反映
     // --------------------------------------------------------------
     const applySnapshot = useCallback((snap: Snapshot) => {
         if (snap.version < versionRef.current) return;
@@ -646,7 +522,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
     const updateClock = (serverNowMs: number, t0: number, t1: number) => {
         const rtt = t1 - t0;
-        // 往復時間が短い応答ほど正確。少しずつ基準を緩めて、回線状況の変化にも追従する
         bestRttRef.current = Math.min(bestRttRef.current * 1.05, Number.MAX_VALUE);
         if (rtt <= bestRttRef.current) {
             bestRttRef.current = rtt;
@@ -654,7 +529,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }
     };
 
-    // ---- 取得（同時に1本だけ。実行中に要求が来たら終わってからもう1回） ----
+    // ---- 取得 ----
     const fetchingRef = useRef(false);
     const refetchRef = useRef(false);
     const fetchSnapshot = useCallback(async () => {
@@ -687,14 +562,14 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         fetchTimerRef.current = window.setTimeout(() => { void fetchSnapshot(); }, delay);
     }, [fetchSnapshot]);
 
-    // ---- リアルタイム配信（更新の合図だけ） ----
+    // ---- リアルタイム配信 ----
     const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
     const nudgeOthers = useCallback(() => {
         const ch = channelRef.current;
         if (ch) void ch.send({ type: 'broadcast', event: 'refresh', payload: { at: Date.now() } });
     }, []);
 
-    // ---- 送信（成功したら最新状態を反映して、他の画面に合図） ----
+    // ---- 送信 ----
     const postAction = useCallback(async (type: string, payload: Record<string, unknown> = {}): Promise<ApiResult> => {
         try {
             const t0 = Date.now();
@@ -722,7 +597,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }
     }, [applySnapshot, authHeaders, nudgeOthers, isHostRole]);
 
-    // 幹事操作の共通ラッパー（二重押し防止・失敗表示）
     const runHost = useCallback(async (type: string, payload: Record<string, unknown> = {}, okMessage?: string) => {
         setHostBusy(true);
         const r = await postAction(type, payload);
@@ -738,8 +612,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     useEffect(() => {
         setIsMounted(true);
         setOrigin(window.location.origin);
-        soundRef.current = new SoundSynthesizer();
-        soundRef.current.muted = role === 'host' || role === 'play';
         try {
             const savedPid = localStorage.getItem('derby_participant_id') || `p_${Math.random().toString(36).slice(2, 11)}`;
             localStorage.setItem('derby_participant_id', savedPid);
@@ -757,7 +629,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         void fetchSnapshot();
     }, [role, isHostRole, fetchSnapshot]);
 
-    // 定期再取得（レース中も止めない）＋ 画面復帰時に即再取得
     useEffect(() => {
         const t = window.setInterval(() => { void fetchSnapshot(); }, pollMs);
         const onVisible = () => { if (document.visibilityState === 'visible') void fetchSnapshot(); };
@@ -772,7 +643,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         };
     }, [fetchSnapshot, pollMs]);
 
-    // リアルタイム配信の購読（再接続のたびに最新状態を取り直す）
     useEffect(() => {
         let cancelled = false;
         const ch = supabase.channel('derby-realtime-room')
@@ -791,7 +661,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         };
     }, [scheduleFetch]);
 
-    // 幹事ログイン状態が変わったら、幹事用の情報（正解着順など）を取り直す
     useEffect(() => {
         if (isHostRole && hostAuthed) {
             versionRef.current = 0;
@@ -799,7 +668,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }
     }, [isHostRole, hostAuthed, fetchSnapshot]);
 
-    // 参加者：名前が決まったら参加登録（再訪時も念のため登録し直す）
     const joinedRef = useRef('');
     useEffect(() => {
         if (role === 'screen' || role === 'host') return;
@@ -812,7 +680,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     }, [role, loaded, participantId, participantName, postAction]);
 
-    // トースト自動消去
     useEffect(() => {
         if (!toastMessage) return;
         const t = window.setTimeout(() => setToastMessage(null), 2800);
@@ -820,9 +687,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }, [toastMessage]);
 
     // --------------------------------------------------------------
-    // レース進行（ゴール確定の多重保険）
+    // レース進行
     // --------------------------------------------------------------
-    // 会場スクリーン：自分の映像でゴールしたら、すぐ結果表示に切り替えて確定を依頼
     onLocalFinishRef.current = (key: string) => {
         if (localFinishedRef.current === key) return;
         localFinishedRef.current = key;
@@ -830,62 +696,37 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         void postAction('finalize_race');
     };
 
-    // 幹事画面：ゴール時刻 +0.3秒 に確定を依頼（スクリーンが閉じていても進む）
     useEffect(() => {
         if (!isHostRole || gameStatus !== 'racing' || raceStartedAt === null || raceDurationMs === null) return;
         const wait = Math.max(0, raceStartedAt + raceDurationMs + 300 - serverNow());
         const t = window.setTimeout(() => { void postAction('finalize_race'); }, wait);
-        const t2 = window.setTimeout(() => { void fetchSnapshot(); }, wait + 2500); // 念のため
+        const t2 = window.setTimeout(() => { void fetchSnapshot(); }, wait + 2500);
         return () => { window.clearTimeout(t); window.clearTimeout(t2); };
     }, [isHostRole, gameStatus, raceStartedAt, raceDurationMs, serverNow, postAction, fetchSnapshot]);
 
-    // 幹事画面のカウントダウン表示
     useEffect(() => {
         if (gameStatus !== 'racing') return;
         const t = window.setInterval(() => setNowTick(x => x + 1), 500);
         return () => window.clearInterval(t);
     }, [gameStatus]);
 
-    // スクリーン上の表示状態：DB がまだ racing でも、自分の映像がゴールしていれば結果を出す
     const displayStatus: GameStatus = (gameStatus === 'racing' && renders3D && localFinishedKey === raceKey) ? 'result' : gameStatus;
 
-    // 効果音（会場スクリーン）
-    const prevDisplayStatusRef = useRef<GameStatus | null>(null);
-    useEffect(() => {
-        const prev = prevDisplayStatusRef.current;
-        prevDisplayStatusRef.current = displayStatus;
-        if (prev === null || prev === displayStatus) return;
-        const snd = soundRef.current;
-        if (!snd) return;
-        if (displayStatus === 'racing' && raceStartedAt !== null && serverNow() - raceStartedAt < 5000) snd.playFanfare();
-        else if (displayStatus === 'result' && prev === 'racing') { snd.playFanfare(); snd.playCheers(); }
-        else if (displayStatus === 'grand_finale') { snd.playFanfare(); snd.playCheers(); }
-    }, [displayStatus, raceStartedAt, serverNow]);
-
     // --------------------------------------------------------------
-    // 実況・残り距離の DOM 直接書き換え（毎フレーム setState しない）
+    // 残り距離の DOM 直接書き換え
     // --------------------------------------------------------------
     const writeRemain = useCallback((value: number) => {
         if (lastRemainRef.current === value) return;
         lastRemainRef.current = value;
         if (remainElRef.current) remainElRef.current.textContent = String(value);
     }, []);
-    const writeCommentary = useCallback((text: string) => {
-        if (lastCommentaryRef.current === text) return;
-        lastCommentaryRef.current = text;
-        if (commentaryElRef.current) commentaryElRef.current.textContent = text;
-    }, []);
     const remainCallbackRef = useCallback((el: HTMLSpanElement | null) => {
         remainElRef.current = el;
         if (el) el.textContent = String(lastRemainRef.current);
     }, []);
-    const commentaryCallbackRef = useCallback((el: HTMLSpanElement | null) => {
-        commentaryElRef.current = el;
-        if (el) el.textContent = lastCommentaryRef.current;
-    }, []);
 
     // --------------------------------------------------------------
-    // Three.js canvas のアタッチ（renderer は1つを使い回し、表示枠が変わったら付け替える）
+    // Three.js canvas アタッチ
     // --------------------------------------------------------------
     const resizeRenderer = useCallback(() => {
         const container = containerElRef.current;
@@ -925,9 +766,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }, [attachRendererToContainer, resizeRenderer]);
 
     // --------------------------------------------------------------
-    // Three.js シーン生成 ＋ 描画ループ（スクリーンのみ。マウント後に1回だけ）
-    // 馬の位置は「発走からの経過秒」でシミュレーションした結果をそのまま映す
-    // カメラは右斜め前からの固定俯瞰で平行移動のみ
+    // Three.js シーン生成 ＋ 描画ループ
     // --------------------------------------------------------------
     useEffect(() => {
         if (!isMounted || !renders3D) return;
@@ -939,7 +778,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         scene.background = new THREE.Color(0x9bd2fc);
         scene.fog = new THREE.FogExp2(0x9bd2fc, 0.0016);
 
-        // 固定カメラ初期設定（もっと右斜め前からの俯瞰、引き・高さを確保）
+        // 固定カメラ（もっと右斜め前からの俯瞰・引きと高さを確保）
         const camera = new THREE.PerspectiveCamera(50, 600 / 650, 0.5, 2000);
         camera.position.set(26, 38, -48);
         camera.lookAt(-4, 0, 8);
@@ -986,55 +825,63 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         finishPole.position.set(-trackWidth / 2 - 1, 8, FINISH_Z);
         scene.add(finishPole);
 
-        // 残り距離標識（壁側・右斜め前の俯瞰から見えるように設置）
+        // 残り距離標識（壁側・右斜め前の俯瞰から特大でハッキリ読めるサイズ）
         const wallCourseX = -trackWidth / 2 - 0.8;
         [1000, 800, 600, 400, 200, 100].forEach(dist => {
             const cv = document.createElement('canvas');
-            cv.width = 256; cv.height = 128;
+            cv.width = 512; cv.height = 256;
             const c2 = cv.getContext('2d');
             if (!c2) return;
+            // 白地パネル ＋ 太い赤枠線
             c2.fillStyle = '#ffffff';
-            c2.fillRect(0, 0, 256, 128);
-            c2.lineWidth = 10;
+            c2.fillRect(0, 0, 512, 256);
+            c2.lineWidth = 20;
             c2.strokeStyle = '#dc2626';
-            c2.strokeRect(5, 5, 246, 118);
+            c2.strokeRect(10, 10, 492, 236);
+
+            // 残り距離 数字（特大）
             c2.fillStyle = '#dc2626';
-            c2.font = '900 68px "Impact", "Arial Black", sans-serif';
+            c2.font = '900 136px "Impact", "Arial Black", sans-serif';
             c2.textAlign = 'center';
             c2.textBaseline = 'middle';
-            c2.fillText(String(dist), 128, 52);
-            c2.fillStyle = '#1e293b';
-            c2.font = 'bold 24px sans-serif';
-            c2.fillText(`残り ${dist}m`, 128, 102);
-            const board = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 2.6), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), side: THREE.DoubleSide }));
-            board.position.set(wallCourseX, 7, FINISH_Z + dist);
+            c2.fillText(String(dist), 256, 104);
+
+            // "残り" ＋ "m" サブテキスト
+            c2.fillStyle = '#0f172a';
+            c2.font = 'bold 50px sans-serif';
+            c2.fillText(`残り ${dist}m`, 256, 204);
+
+            // 看板サイズを従来の2倍以上（11.5m x 5.75m）に拡大して視認性を劇的に向上
+            const board = new THREE.Mesh(new THREE.PlaneGeometry(11.5, 5.75), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), side: THREE.DoubleSide }));
+            board.position.set(wallCourseX, 7.8, FINISH_Z + dist);
             board.rotation.y = Math.PI * 0.45;
-            const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.25, 0.25), new THREE.MeshLambertMaterial({ color: 0x334155 }));
-            arm.position.set(wallCourseX - 0.5, 7, FINISH_Z + dist);
-            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 7, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }));
-            post.position.set(wallCourseX + 0.1, 3.5, FINISH_Z + dist);
+
+            const arm = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.4, 0.4), new THREE.MeshLambertMaterial({ color: 0x334155 }));
+            arm.position.set(wallCourseX - 0.8, 7.8, FINISH_Z + dist);
+            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 8, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+            post.position.set(wallCourseX + 0.1, 4, FINISH_Z + dist);
             scene.add(board, arm, post);
         });
 
-        // GOAL 看板
+        // GOAL 看板（特大）
         const goalCv = document.createElement('canvas');
-        goalCv.width = 256; goalCv.height = 128;
+        goalCv.width = 512; goalCv.height = 256;
         const gc = goalCv.getContext('2d');
         if (gc) {
             gc.fillStyle = '#b91c1c';
-            gc.fillRect(0, 0, 256, 128);
-            gc.lineWidth = 8;
+            gc.fillRect(0, 0, 512, 256);
+            gc.lineWidth = 16;
             gc.strokeStyle = '#facc15';
-            gc.strokeRect(4, 4, 248, 120);
+            gc.strokeRect(8, 8, 496, 240);
             gc.fillStyle = '#facc15';
-            gc.font = '900 60px "Impact", sans-serif';
+            gc.font = '900 120px "Impact", sans-serif';
             gc.textAlign = 'center';
             gc.textBaseline = 'middle';
-            gc.fillText('GOAL', 128, 56);
+            gc.fillText('GOAL', 256, 112);
             gc.fillStyle = '#ffffff';
-            gc.font = 'bold 22px sans-serif';
-            gc.fillText('FINISH LINE', 128, 104);
-            const goalBoard = new THREE.Mesh(new THREE.PlaneGeometry(8, 4), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(goalCv), side: THREE.DoubleSide }));
+            gc.font = 'bold 44px sans-serif';
+            gc.fillText('FINISH LINE', 256, 208);
+            const goalBoard = new THREE.Mesh(new THREE.PlaneGeometry(12, 6), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(goalCv), side: THREE.DoubleSide }));
             goalBoard.position.set(wallCourseX, 10, FINISH_Z);
             goalBoard.rotation.y = Math.PI * 0.45;
             scene.add(goalBoard);
@@ -1055,15 +902,14 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         let lastTime = performance.now();
         let elapsed = 0;
         const badgeWorldPos = new THREE.Vector3();
-        let gallopTimer = 0;
         let rankTimer = 0;
         let frameId = 0;
         let snapCamera = true;
-        let maxSimT = 0; // 同一レース中の巻き戻り防止ガード
+        let maxSimT = 0;
         let focusZ = RACE_START_Z;
         let focusInitialized = false;
 
-        // 固定カメラ設定（右斜め前からの俯瞰・平行移動のみ）
+        // 固定カメラ（右斜め前からの俯瞰・平行移動のみ）
         const CAM_X = 26;
         const CAM_Y = 38;
         const CAM_OFFSET_Z = -48;
@@ -1101,7 +947,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 let targetT = status === 'racing'
                     ? Math.max(0, Math.min(durationSec, (Date.now() + clockOffsetRef.current - startedAt) / 1000))
                     : durationSec;
-                // 巻き戻り防止ガード：同一レース中は targetT が過去に戻らないようにする
                 if (status === 'racing') {
                     targetT = Math.max(targetT, maxSimT);
                     maxSimT = targetT;
@@ -1114,12 +959,10 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 maxSimT = 0;
                 focusInitialized = false;
                 writeRemain(1000);
-                writeCommentary(INITIAL_COMMENTARY);
                 setRealtimeRanks([0, 1, 2, 3, 4, 5, 6, 7]);
             }
             const running = status === 'racing' && inRace && !sim.done;
 
-            // ゴール → 結果表示へ（1レース1回だけ）
             if (status === 'racing' && inRace && sim.done && localFinishedRef.current !== key) {
                 onLocalFinishRef.current(key);
             }
@@ -1139,17 +982,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 m.legs.legBL.rotation.x = -swing * 0.75;
                 m.legs.head.rotation.x = -Math.PI / 8 + Math.cos(elapsed * legSpeed * 2) * 0.1;
                 m.legs.tail.rotation.z = Math.sin(elapsed * legSpeed) * 0.25;
-                // カメラの真横を通る馬のバッジが画面を覆わないよう近距離では隠す
                 m.badge.getWorldPosition(badgeWorldPos);
                 m.badge.visible = camera.position.distanceTo(badgeWorldPos) > 14;
             });
 
             if (running) {
-                gallopTimer += delta;
-                if (gallopTimer > 0.18 && soundRef.current) {
-                    soundRef.current.playGallop();
-                    gallopTimer = 0;
-                }
                 rankTimer += delta;
                 if (rankTimer >= 0.2) {
                     rankTimer = 0;
@@ -1159,24 +996,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 const leader = sim.horses[lead];
                 const remain = Math.min(1000, Math.max(0, Math.floor(leader.z - FINISH_Z)));
                 writeRemain(remain);
-                const scenario = scenarioOf(raceIdx);
-                if (remain > 750) writeCommentary("全馬一斉にスタート！各馬激しいポジション争い！");
-                else if (remain > 500) writeCommentary("道中は目まぐるしく先頭が入れ替わる大混戦！誰が勝つか分からない！");
-                else if (remain > 280) {
-                    if (scenario === 0) writeCommentary("第4コーナー！後方から大外へ持ち出した！");
-                    else if (scenario === 1) writeCommentary("第4コーナー！インコース内ラチ沿いに潜り込む！");
-                    else if (scenario === 2) writeCommentary("2頭が抜け出した！壮絶な一騎打ちの様相！");
-                    else writeCommentary("直線コースへ！先頭集団が意地と意地のぶつかり合い！");
-                } else if (remain > 70) {
-                    if (scenario === 0) writeCommentary("残り200m！大外一気！豪快な末脚が炸裂したー！！");
-                    else if (scenario === 1) writeCommentary("残り200m！内から一閃！最短コースを電光石火で突き抜ける！");
-                    else if (scenario === 2) writeCommentary("残り200m！叩き合い！並んだ！ハナ差の壮絶なデッドヒート！！");
-                    else writeCommentary("残り200m！必死の二枚腰！逃げ切れるか！迫る追撃！！");
-                } else if (remain > 0) writeCommentary("ゴール板前！最後の力を振り絞る！大激戦のゴールインへ！！");
-                else writeCommentary("ゴールイン！！大歓声の中、着順が確定しました！");
             }
 
-            // 固定カメラの平行移動：先頭寄りの馬群中心を追う（ズーム・画角変更は一切しない）
+            // 固定カメラ平行移動
             if (meshes.length > 0) {
                 let minZ = Infinity;
                 let maxZ = -Infinity;
@@ -1216,12 +1038,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             });
             renderer?.dispose();
             rendererRef.current = null;
-            sceneRefClear();
-        };
-        function sceneRefClear() {
             cameraRef.current = null;
-        }
-    }, [isMounted, renders3D, attachRendererToContainer, writeRemain, writeCommentary]);
+        };
+    }, [isMounted, renders3D, attachRendererToContainer, writeRemain]);
 
     // --------------------------------------------------------------
     // 派生値
@@ -1231,10 +1050,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         question: '問題を読み込み中…', options: HORSES_DATA.map(h => h.name), correctOrder: []
     };
 
-    // 単勝オッズ・配当計算
     const odds = useMemo(() => computeWinOdds(participants.map(p => p.betSlip)), [participants]);
 
-    // 参加者の自分の馬券・判定
     const myBet = useMemo(() => {
         const me = participants.find(p => p.id === participantId);
         return me?.betSlip ?? null;
@@ -1245,7 +1062,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         return judgeBet(myBet, correctOrder);
     }, [correctOrder, myBet]);
 
-    // 総合順位（同点は同順位）
     const ranked = useMemo(() => {
         const sorted = [...participants].sort((a, b) => b.score - a.score);
         return sorted;
@@ -1257,7 +1073,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const confirm = (opts: Omit<ConfirmDialogState, 'isOpen'>) => setConfirmDialog({ isOpen: true, ...opts });
     const closeConfirm = () => setConfirmDialog(CLOSED_DIALOG);
 
-    // 幹事ログイン
     const hostLogin = async () => {
         setLoginError(null);
         setHostBusy(true);
@@ -1272,7 +1087,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         try { sessionStorage.setItem(HOST_PW_KEY, loginInput); } catch { /* noop */ }
     };
 
-    // 幹事：レース開始（出走）
     const startRace = () => {
         if (!correctOrder || correctOrder.length < 3) {
             setToastMessage('正解着順（1〜3着）が設定されていません。「問題登録」タブで設定してください');
@@ -1280,7 +1094,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }
         confirm({
             title: `第${currentRaceIndex + 1}レースを発走しますか？`,
-            message: '投票の受付を終了し、ファンファーレとともにレースを開始します。',
+            message: '投票の受付を終了し、レースを開始します。',
             confirmLabel: '発走！',
             onConfirm: () => {
                 closeConfirm();
@@ -1289,7 +1103,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     };
 
-    // 幹事：次のレースへ
     const nextRace = () => {
         const nextIdx = currentRaceIndex + 1;
         if (nextIdx >= races.length) {
@@ -1307,7 +1120,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     };
 
-    // 幹事：前のレースへ
     const prevRace = () => {
         if (currentRaceIndex <= 0) return;
         confirm({
@@ -1321,7 +1133,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     };
 
-    // 幹事：今のレースをやり直す
     const resetCurrentRace = () => {
         confirm({
             title: `第${currentRaceIndex + 1}レースをやり直しますか？`,
@@ -1334,7 +1145,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     };
 
-    // 幹事：全得点リセット
     const resetAllGame = () => {
         confirm({
             title: '全参加者の得点をリセットしますか？',
@@ -1348,11 +1158,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     };
 
-    // 幹事：表彰
     const openGrandFinale = () => void runHost('set_status', { status: 'grand_finale' });
     const closeGrandFinale = () => void runHost('set_status', { status: 'result' });
 
-    // 幹事：問題編集の下書き
     const draftDirty = draftRaces !== null;
     const activeEditRace = (draftRaces ?? races)[editRaceIndex] || currentRace;
     const updateDraftRace = (patch: Partial<DerbyRace>) => {
@@ -1402,12 +1210,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     };
     const discardDraft = () => setDraftRaces(null);
 
-    const toggleSound = () => {
-        const next = !isMuted;
-        if (soundRef.current) soundRef.current.muted = next;
-        setIsMuted(next);
-    };
-
     // 参加者
     const submitName = () => {
         const name = nameInput.trim().slice(0, 30);
@@ -1438,7 +1240,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         }
         setSelectedChoices([]);
         if (r.duplicate) setToastMessage('このレースはすでに投票済みです');
-        else soundRef.current?.playCheers();
     };
 
     const roleUrl = (r: 'play' | 'screen' | 'host') => `${origin}${basePath}/${r}`;
@@ -1462,11 +1263,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         );
     }
 
-    // ==============================================================
-    // 画面
-    // ==============================================================
     const hostPanelLocked = isHostRole && !hostAuthed;
-    // 開発用3画面同時ではスクリーン枠が狭いので、右側のボードを細くする
     const overlayW = role === 'multiview' ? 'w-52' : 'w-64 sm:w-80';
 
     return (
@@ -1525,15 +1322,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                 <span className={`w-1.5 h-1.5 rounded-full ${isCloudConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
                                 {isCloudConnected ? '同期中' : '自動同期中'}
                             </span>
-                        )}
-                        {role !== 'play' && (
-                            <button
-                                onClick={toggleSound}
-                                className="p-1 px-2.5 rounded-lg border border-slate-700 text-xs bg-slate-800 text-slate-300 hover:text-white flex items-center gap-1.5"
-                            >
-                                {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 text-amber-400" />}
-                                <span className="text-[11px] font-mono">{isMuted ? 'MUTE' : 'SOUND'}</span>
-                            </button>
                         )}
                     </div>
                 </header>
@@ -1601,7 +1389,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             </button>
                                         </div>
                                     ) : (<>
-                                        {/* ユーザーヘッダー */}
                                         <div className="flex items-center justify-between bg-slate-900/90 border border-slate-800 px-3 py-2 rounded-xl">
                                             <div className="flex items-center gap-2 truncate">
                                                 <span className="text-xs">👤</span>
@@ -1615,7 +1402,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             </div>
                                         </div>
 
-                                        {/* レース情報 */}
                                         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 space-y-1.5">
                                             <div className="flex items-center justify-between text-[11px] font-mono">
                                                 <span className="text-amber-400 font-bold">第{currentRaceIndex + 1}レース / 全{races.length}R</span>
@@ -1627,7 +1413,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             <p className="text-xs text-slate-300 leading-relaxed font-bold">{currentRace.question}</p>
                                         </div>
 
-                                        {/* 投票済み表示 */}
                                         {myBet ? (
                                             <div className="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-3 space-y-2">
                                                 <div className="flex items-center justify-between text-xs">
@@ -1649,7 +1434,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                     })}
                                                 </div>
 
-                                                {/* 結果発表 */}
                                                 {displayStatus === 'result' && myResult && (
                                                     <div className="mt-2 pt-2 border-t border-slate-800 space-y-1.5 text-center">
                                                         <div className="text-xs text-slate-400">判定</div>
@@ -1662,7 +1446,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 )}
                                             </div>
                                         ) : (
-                                            /* 投票受付フォーム */
                                             gameStatus !== 'idle' ? (
                                                 <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-center text-xs text-slate-400 space-y-1">
                                                     <div className="text-amber-400 font-bold">投票受付は終了しました</div>
@@ -1693,7 +1476,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                 {isSel ? (
                                                                     <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-500 text-slate-950 shrink-0">第{selIdx + 1}位</span>
                                                                 ) : (
-                                                                    <span className="text-[10px] font-mono text-slate-500 shrink-0">{odds.odds[idx] === null ? '' : `${formatOdds(odds.odds[idx])}倍`}</span>
+                                                                    <span className="text-[10px] font-mono text-slate-400 shrink-0">{odds.counts[idx]}票</span>
                                                                 )}
                                                             </button>
                                                         );
@@ -1708,9 +1491,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                     {betError && (
                                                         <p role="alert" className="text-[11px] text-rose-200 bg-rose-950/60 border border-rose-900 rounded-lg p-2">{betError}</p>
                                                     )}
-                                                    <p className="text-[10px] text-slate-500 px-1">右の数字は単勝オッズ（みんなの1位予想から計算）</p>
 
-                                                    {/* 得点ルール */}
                                                     <details className="bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-[11px]">
                                                         <summary className="font-bold text-amber-300 cursor-pointer">得点ルールを見る</summary>
                                                         <div className="mt-2 space-y-1">
@@ -1765,32 +1546,29 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                     </div>
                                 )}
 
-                                {/* ブラウザは操作なしに音を出せないため、会場スクリーンは最初に1回クリックしてもらう */}
-                                {role === 'screen' && !audioUnlocked && (
-                                    <button
-                                        onClick={() => { soundRef.current?.init(); setAudioUnlocked(true); }}
-                                        className="absolute inset-0 z-[60] bg-slate-950/90 flex flex-col items-center justify-center gap-3 text-center"
-                                    >
-                                        <span className="text-4xl">🏇</span>
-                                        <span className="text-lg font-black text-amber-300">クリックして中継を開始</span>
-                                        <span className="text-xs text-slate-400">ファンファーレ・実況音を有効にします</span>
-                                    </button>
-                                )}
-
-                                {/* 上部オーバーレイ：左＝レース名、右＝残り距離・オッズ／順位ボード */}
-                                <div className="absolute top-0 inset-x-0 p-3 sm:p-4 z-20 flex items-start justify-between pointer-events-none">
+                                {/* 上部オーバーレイ：左＝レース名（特大）、右＝残り距離・投票数／順位ボード */}
+                                <div className="absolute top-0 inset-x-0 p-3 sm:p-5 z-20 flex items-start justify-between pointer-events-none">
+                                    {/* 左上：レースの名前をもっとでかく */}
                                     <div className="flex flex-col gap-2 pointer-events-auto">
-                                        <div className="bg-slate-950/85 backdrop-blur border border-slate-700/80 rounded-xl px-3.5 py-2 shadow-xl font-mono flex items-center gap-2">
-                                            <span className="text-base sm:text-lg">🏇</span>
-                                            <div>
-                                                <div className="text-[10px] text-amber-400 font-bold tracking-wider">RACE {currentRaceIndex + 1}</div>
-                                                <div className="text-xs sm:text-sm font-black text-white truncate max-w-[180px] sm:max-w-xs">{currentRace.name}</div>
+                                        <div className="bg-slate-950/90 backdrop-blur-md border-2 border-amber-500/60 rounded-2xl px-5 py-3.5 shadow-2xl font-mono flex items-center gap-3.5 max-w-lg">
+                                            <span className="text-3xl sm:text-4xl shrink-0">🏇</span>
+                                            <div className="min-w-0">
+                                                <div className="text-xs sm:text-sm text-amber-400 font-black tracking-widest uppercase">
+                                                    RACE {currentRaceIndex + 1} / 全{races.length}R
+                                                </div>
+                                                <div className="text-xl sm:text-2xl lg:text-3xl font-black text-white truncate drop-shadow leading-tight mt-0.5">
+                                                    {currentRace.name}
+                                                </div>
+                                                <div className="text-xs sm:text-sm text-amber-200/90 font-bold truncate mt-1">
+                                                    {currentRace.question}
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
 
-                                    <div className="flex flex-col items-end gap-2 pointer-events-auto">
-                                        {/* 残り距離 */}
+                                    {/* 右上：残り距離 ＆ 投票数/順位ボード */}
+                                    <div className="flex flex-col items-end gap-2.5 pointer-events-auto">
+                                        {/* 残り距離メーター */}
                                         <div className={`bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-xl px-4 py-2 flex items-center justify-between shadow-xl font-mono ${overlayW}`}>
                                             <span className="text-xs sm:text-sm text-slate-300 font-bold">残り距離</span>
                                             <div className="flex items-baseline gap-1">
@@ -1799,17 +1577,16 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             </div>
                                         </div>
 
-                                        {/* 単勝オッズ ＆ リアルタイム順位ボード */}
+                                        {/* 投票数 ＆ リアルタイム順位ボード（単勝オッズは非表示にし投票数を表示） */}
                                         <div className={`bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-2xl p-3 shadow-2xl ${overlayW} font-mono`}>
                                             <div className="text-xs sm:text-sm font-black text-amber-300 border-b border-slate-800 pb-2 mb-2 flex justify-between items-center gap-2">
-                                                <span>{gameStatus === 'racing' ? 'リアルタイム順位' : '単勝オッズ'}</span>
+                                                <span>{gameStatus === 'racing' ? 'リアルタイム順位' : '投票数'}</span>
                                                 <span className="text-[11px] text-slate-400 font-bold">{odds.total}票</span>
                                             </div>
                                             <div className="space-y-1.5">
                                                 {(gameStatus === 'racing' ? realtimeRanks : [0, 1, 2, 3, 4, 5, 6, 7]).map((hIdx, rankIdx) => {
                                                     const h = HORSES_DATA[hIdx];
                                                     const isRacing = gameStatus === 'racing';
-                                                    const pop = odds.popularity[hIdx];
                                                     return (
                                                         <div key={h.letter} className="flex items-center justify-between text-xs font-bold px-2 py-1.5 rounded-xl bg-black/60 border border-slate-800/80 shadow-sm">
                                                             <div className="flex items-center gap-2 truncate flex-1 min-w-0">
@@ -1824,34 +1601,21 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                 <span className="text-white text-xs sm:text-sm font-black truncate">{currentRace.options[hIdx] || h.name}</span>
                                                             </div>
                                                             <span className="flex items-baseline gap-1 shrink-0 ml-2">
-                                                                {pop !== null && pop <= 3 && !isRacing && <span className="text-[10px] text-rose-300">{pop}人気</span>}
-                                                                <span className={`font-mono text-xs sm:text-sm font-black ${odds.odds[hIdx] === null ? 'text-slate-600' : 'text-amber-300'}`}>
-                                                                    {formatOdds(odds.odds[hIdx])}
+                                                                <span className="font-mono text-xs sm:text-sm font-black text-amber-300">
+                                                                    {odds.counts[hIdx] ?? 0}票
                                                                 </span>
                                                             </span>
                                                         </div>
                                                     );
                                                 })}
                                             </div>
-                                            <div className="text-[10px] text-slate-500 mt-2">1位予想の票数から算出（払戻率80%）</div>
                                         </div>
                                     </div>
                                 </div>
 
-                                {/* 下部：実況テロップ */}
-                                {(displayStatus === 'racing' || displayStatus === 'idle') && (
-                                    <div className="absolute bottom-3 sm:bottom-5 inset-x-3 z-20 pointer-events-none flex justify-center">
-                                        <div className="w-full max-w-2xl bg-slate-950/90 backdrop-blur border border-slate-800 px-4 py-2 rounded-xl shadow-xl flex items-center gap-2.5 text-sm">
-                                            <span className="bg-slate-800 text-amber-300 text-xs font-bold px-2 py-0.5 rounded shrink-0">実況</span>
-                                            <span ref={commentaryCallbackRef} className="text-white tracking-wide truncate font-bold" />
-                                        </div>
-                                    </div>
-                                )}
-
                                 {/* 着順確定画面（画面いっぱいフルスクリーン） */}
                                 {displayStatus === 'result' && correctOrder && (
                                     <div className="absolute inset-0 z-40 bg-slate-950/95 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6 lg:p-8 text-center overflow-y-auto">
-                                        {/* 上部ヘッダー */}
                                         <div className="shrink-0 space-y-1 sm:space-y-2">
                                             <div className="inline-flex items-center gap-2 px-3 sm:px-5 py-1 sm:py-1.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-amber-300 font-black text-xs sm:text-sm tracking-wider shadow-lg">
                                                 <span className="text-sm sm:text-base">🏁</span>
@@ -1863,7 +1627,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             <p className="text-xs sm:text-sm lg:text-base text-amber-200/90 font-bold max-w-3xl mx-auto px-2">{currentRace.question}</p>
                                         </div>
 
-                                        {/* 中央：1着・2着・3着のカード（横並び3列） */}
+                                        {/* 中央：1着・2着・3着のカード */}
                                         <div className="my-auto py-2 sm:py-4 w-full max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 lg:gap-6">
                                             {correctOrder.slice(0, 3).map((hIdx, rank) => {
                                                 const h = HORSES_DATA[hIdx];
@@ -1882,9 +1646,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                             <div className="text-base sm:text-lg lg:text-xl font-black text-white leading-snug break-words px-1">{currentRace.options[hIdx]}</div>
                                                         </div>
                                                         <div className="mt-2 pt-2 border-t border-slate-800/80 w-full flex items-center justify-center gap-3 font-mono">
-                                                            <span className="text-[10px] sm:text-xs text-slate-400">単勝</span>
-                                                            <span className={`text-base sm:text-xl font-black ${st.accent}`}>{odds.odds[hIdx] === null ? '---' : `${formatOdds(odds.odds[hIdx])}倍`}</span>
-                                                            <span className="text-[10px] sm:text-xs text-slate-400">{odds.anyCounts[hIdx]}票</span>
+                                                            <span className="text-[10px] sm:text-xs text-slate-400">投票数</span>
+                                                            <span className={`text-base sm:text-xl font-black ${st.accent}`}>{odds.counts[hIdx] ?? 0}票</span>
                                                         </div>
                                                     </div>
                                                 );
@@ -1992,7 +1755,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                 </div>
                             )}
 
-                            {/* 幹事画面（role=host）は高さを固定せず全項目を表示。multiview だけ枠内スクロール */}
                             <div
                                 className={`w-full bg-slate-900 rounded-2xl shadow-xl border border-slate-800 p-4 space-y-3 ${role === 'host' ? '' : 'overflow-y-auto'}`}
                                 style={role === 'host' ? undefined : { height: 670 }}
@@ -2020,7 +1782,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                         </button>
                                     </div>
                                 ) : (<>
-                                    {/* 管理サブタブ */}
                                     <div className="grid grid-cols-2 gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-center text-xs font-bold">
                                         <button onClick={() => setAdminSubTab('live')} className={`py-1.5 rounded-lg transition-all ${adminSubTab === 'live' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}>
                                             当日進行
@@ -2032,7 +1793,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
                                     {adminSubTab === 'live' && (
                                         <div className="space-y-3">
-                                            {/* 進行ステータス */}
                                             <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
                                                 <div className="flex items-center justify-between text-xs">
                                                     <span className="font-bold text-slate-300">現在のステータス</span>
@@ -2041,7 +1801,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                     </span>
                                                 </div>
 
-                                                {/* 出走中の残り秒数 */}
                                                 {gameStatus === 'racing' && raceStartedAt !== null && raceDurationMs !== null && (
                                                     <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2 text-center">
                                                         <div className="text-[10px] text-amber-300">着順確定まで</div>
@@ -2057,7 +1816,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             </div>
 
-                                            {/* 主な操作ボタン */}
                                             <div className="space-y-2">
                                                 {gameStatus === 'idle' && (
                                                     <button
@@ -2091,11 +1849,10 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 )}
                                             </div>
 
-                                            {/* 正解着順の確認・クイック変更 */}
                                             <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
                                                 <div className="flex items-center justify-between text-xs">
                                                     <span className="font-bold text-slate-300">正解着順（幹事のみ表示）</span>
-                                                    {gameStatus === 'idle' && <span className="text-[10px] text-amber-400">発走前に変更可</span>}
+                                                    {gameStatus !== 'racing' && <span className="text-[10px] text-amber-400">変更可</span>}
                                                 </div>
                                                 <div className="grid grid-cols-3 gap-1.5 font-mono">
                                                     {[0, 1, 2].map(rank => {
@@ -2110,7 +1867,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                         const val = Number(e.target.value);
                                                                         const next: BetOrder = correctOrder ? [...correctOrder] : [0, 1, 2];
                                                                         next[rank] = val;
-                                                                        void runHost('set_correct_order', { order: next });
+                                                                        void runHost('set_correct_order', { correctOrder: next });
                                                                     }}
                                                                     className="w-full bg-slate-950 border border-slate-700 rounded text-xs font-bold text-amber-300 p-1 mt-1"
                                                                 >
@@ -2126,7 +1883,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             </div>
 
-                                            {/* レース移動・微調整 */}
                                             <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
                                                 <div className="text-xs font-bold text-slate-300">レース切り替え</div>
                                                 <div className="grid grid-cols-2 gap-2">
@@ -2156,7 +1912,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 )}
                                             </div>
 
-                                            {/* URL 共有 */}
                                             <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
                                                 <div className="text-xs font-bold text-slate-300">各画面のURL</div>
                                                 <div className="space-y-1.5 text-xs">
@@ -2175,7 +1930,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             </div>
 
-                                            {/* 危険ゾーン */}
                                             <div className="pt-2">
                                                 <button
                                                     onClick={resetAllGame}
@@ -2190,7 +1944,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
                                     {adminSubTab === 'edit' && (
                                         <div className="space-y-3">
-                                            {/* レース一覧 */}
                                             <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
                                                 {(draftRaces ?? races).map((_, i) => (
                                                     <button
@@ -2209,7 +1962,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </button>
                                             </div>
 
-                                            {/* 編集フォーム */}
                                             <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2.5">
                                                 <div className="flex items-center justify-between">
                                                     <span className="text-xs font-bold text-slate-300">第{editRaceIndex + 1}レースの設定</span>
@@ -2262,7 +2014,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </div>
                                             </div>
 
-                                            {/* 保存・破棄ボタン */}
                                             {draftDirty && (
                                                 <div className="grid grid-cols-2 gap-2 pt-1 sticky bottom-0 bg-slate-900/90 backdrop-blur p-2 rounded-xl border border-amber-500/30">
                                                     <button
@@ -2290,7 +2041,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 </div>
             </main>
 
-            {/* トースト表示 */}
             {toastMessage && (
                 <div role="status" className="fixed bottom-4 right-4 z-[90] bg-slate-900/95 border border-amber-400/60 text-amber-200 text-xs font-bold px-4 py-2.5 rounded-xl shadow-2xl animate-fade-in flex items-center gap-2">
                     <span>✨</span>
@@ -2298,7 +2048,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 </div>
             )}
 
-            {/* 確認モーダル */}
             {confirmDialog.isOpen && (
                 <div role="dialog" aria-modal="true" className="fixed inset-0 z-[100] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
                     <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl">
