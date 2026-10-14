@@ -1,469 +1,412 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { computeRaceDurationMs, isValidOrder, judgeBet, OPTION_COUNT, type BetOrder } from "@/lib/derby-core";
 
 export const dynamic = 'force-dynamic';
 
+// =====================================================================
+// 3連単アンケートゲーム API
+//   GET  … 現在の状態（進行・問題・参加者・現在レースの馬券）を返す。
+//          レース終了時刻を過ぎていれば、ここで着順確定まで行う（誰も確定を送らなくても進む）
+//   POST … 参加登録・投票（誰でも）／着順確定（時刻を過ぎていれば誰でも）／進行操作（幹事のみ）
+// 状態は DB だけが正。全画面は「POSTの結果」か「GET」で同じスナップショットを受け取る。
+// =====================================================================
+
+const GAME_ID = "derby_current";
+type GameStatus = 'idle' | 'racing' | 'result' | 'grand_finale';
+type Supabase = ReturnType<typeof createServiceClient>;
+
 interface DerbyRaceInput {
     id: string;
-    roundIndex: number;
     name: string;
     question: string;
     options: string[];
-    correctOrder: number[];
 }
 
-const DEFAULT_RACES: DerbyRaceInput[] = [
+interface GameRow {
+    id: string;
+    current_race_index: number;
+    status: GameStatus;
+    correct_order: number[];
+    race_started_at: string | null;
+    updated_at: string;
+}
+
+interface RaceRow { id: string; round_index: number; name: string; question: string; options: string[]; correct_order: number[] }
+interface BetRow {
+    id: string; game_id: string; race_index: number; participant_id: string; participant_name: string;
+    bet_order: number[]; score_gained: number; created_at: string;
+}
+
+const DEFAULT_RACES: (DerbyRaceInput & { correctOrder: BetOrder })[] = [
     {
         id: "race_1",
-        roundIndex: 0,
         name: "第1R：新婦の手料理杯",
         question: "新郎が一生涯食べ続けたい「新婦の手料理No.1」は？",
-        options: [
-            "特製ハンバーグ",
-            "特製オムライス",
-            "特製肉じゃが",
-            "カレーライス",
-            "絶品唐揚げ",
-            "特製お味噌汁",
-            "特製デザート",
-            "まだ作ってもらってない"
-        ],
+        options: ["特製ハンバーグ", "特製オムライス", "特製肉じゃが", "カレーライス", "絶品唐揚げ", "特製お味噌汁", "特製デザート", "まだ作ってもらってない"],
         correctOrder: [6, 4, 0]
     },
     {
         id: "race_2",
-        roundIndex: 1,
         name: "第2R：新郎の直してほしいところ特別",
         question: "新婦が告白！「新郎のここだけは直してほしいところ」は？",
-        options: [
-            "夜中の大爆音いびき",
-            "休日に昼過ぎまで爆睡",
-            "脱いだ靴下丸めて放置",
-            "ゲーム中に返事しない",
-            "急な筋肉自慢アピール",
-            "記念日や約束を忘れがち",
-            "優しすぎて優柔不断",
-            "非の打ち所なし（神）"
-        ],
+        options: ["夜中の大爆音いびき", "休日に昼過ぎまで爆睡", "脱いだ靴下丸めて放置", "ゲーム中に返事しない", "急な筋肉自慢アピール", "記念日や約束を忘れがち", "優しすぎて優柔不断", "非の打ち所なし（神）"],
         correctOrder: [0, 2, 4]
     },
     {
         id: "race_3",
-        roundIndex: 2,
         name: "第3R：二人の思い出ステークス（最終戦）",
         question: "新郎新婦が選ぶ「一番思い出に残っているデートスポット」は？",
-        options: [
-            "初デートの水族館",
-            "雨の東京ディズニーランド",
-            "二人で行った沖縄旅行",
-            "近所のいつもの居酒屋",
-            "夜景を見に行った展望台",
-            "ドライブで行った富士山",
-            "おうち映画鑑賞会",
-            "プロポーズした高級ホテル"
-        ],
+        options: ["初デートの水族館", "雨の東京ディズニーランド", "二人で行った沖縄旅行", "近所のいつもの居酒屋", "夜景を見に行った展望台", "ドライブで行った富士山", "おうち映画鑑賞会", "プロポーズした高級ホテル"],
         correctOrder: [2, 7, 0]
     }
 ];
 
-// 得点計算ルール：
-// サンレンタン完全的中: +6pt
-// サンレンプク的中: +4pt
-// ニレンタン的中: +3pt
-// プクプク的中: +2pt (正解1着・2着を着順不問で含む)
-// タン的中: +1pt (1着的中)
-function calculateBetScore(bet: number[] | null, correct: number[]): number {
-    if (!bet || bet.length < 3 || correct.length < 3) return 0;
-    // 1. サンレンタン (+6pt)
-    if (bet[0] === correct[0] && bet[1] === correct[1] && bet[2] === correct[2]) return 6;
-
-    // 2. サンレンプク (+4pt)
-    const betSet = new Set(bet.slice(0, 3));
-    const correctSet = new Set(correct.slice(0, 3));
-    const isFuku = betSet.size === 3 && correctSet.size === 3 && bet.slice(0, 3).every(x => correctSet.has(x));
-    if (isFuku) return 4;
-
-    // 3. ニレンタン (+3pt)
-    if (bet[0] === correct[0] && bet[1] === correct[1]) return 3;
-
-    // 4. プクプク (+2pt): 正解の1着・2着の2頭を着順不問で含む
-    const top2 = new Set([correct[0], correct[1]]);
-    const matchedTop2 = bet.slice(0, 3).filter(x => top2.has(x));
-    if (matchedTop2.length >= 2) return 2;
-
-    // 5. タン (+1pt): 1着的中
-    if (bet[0] === correct[0]) return 1;
-
-    return 0;
+// ---------------------------------------------------------------------
+// 共通
+// ---------------------------------------------------------------------
+class ApiError extends Error {
+    constructor(public status: number, message: string) { super(message); }
 }
 
-// GET: 最新のゲーム・レース・参加者・投票データを取得
-export async function GET() {
+function isHost(request: NextRequest): boolean {
+    const hostPassword = process.env.HOST_PASSWORD;
+    if (!hostPassword) return false;
+    return request.headers.get("x-host-password") === hostPassword;
+}
+
+/** DB エラーを画面に出せる日本語に変換（未マイグレーションも検出） */
+function dbFail(label: string, err: { code?: string; message?: string } | null): never {
+    console.error(`${label}:`, err);
+    const msg = err?.message || '';
+    if (err?.code === '42703' || err?.code === 'PGRST204' || /race_started_at/.test(msg)) {
+        throw new ApiError(500, 'DBの更新が必要です。supabase/migrations/20261012_derby_v2.sql を SQL Editor で実行してください');
+    }
+    if (err?.code === '23514') {
+        throw new ApiError(500, 'DBの制限に引っかかりました（第4R以降を使うには 20261012_derby_v2.sql の実行が必要です）');
+    }
+    throw new ApiError(500, `${label}に失敗しました`);
+}
+
+const nowIso = () => new Date().toISOString();
+
+async function getGame(sb: Supabase): Promise<GameRow> {
+    const { data, error } = await sb.from("derby_games").select("*").eq("id", GAME_ID).maybeSingle();
+    if (error) dbFail("進行状態の取得", error);
+    if (data) return data as GameRow;
+    const { data: created, error: insErr } = await sb.from("derby_games")
+        .insert({ id: GAME_ID, current_race_index: 0, status: "idle", correct_order: DEFAULT_RACES[0].correctOrder })
+        .select("*").single();
+    if (insErr) dbFail("進行状態の作成", insErr);
+    return created as GameRow;
+}
+
+async function getRaces(sb: Supabase): Promise<RaceRow[]> {
+    const { data, error } = await sb.from("derby_races").select("*").order("round_index", { ascending: true });
+    if (error) dbFail("問題の取得", error);
+    if (data && data.length > 0) return data as RaceRow[];
+    // 未登録なら初期問題を登録
+    const rows = DEFAULT_RACES.map((r, i) => ({ id: r.id, round_index: i, name: r.name, question: r.question, options: r.options, correct_order: r.correctOrder }));
+    const { error: insErr } = await sb.from("derby_races").upsert(rows);
+    if (insErr) dbFail("初期問題の登録", insErr);
+    return rows;
+}
+
+async function updateGame(sb: Supabase, fields: Partial<Omit<GameRow, 'id' | 'updated_at'>>) {
+    const { error } = await sb.from("derby_games").update({ ...fields, updated_at: nowIso() }).eq("id", GAME_ID);
+    if (error) dbFail("進行状態の保存", error);
+}
+
+/** 全参加者の累計得点を、全馬券の獲得点の合計から作り直す（何度実行しても同じ結果） */
+async function recomputeTotals(sb: Supabase) {
+    const [bets, ps] = await Promise.all([
+        sb.from("derby_bets").select("participant_id, score_gained").eq("game_id", GAME_ID),
+        sb.from("derby_participants").select("id, name")
+    ]);
+    if (bets.error) dbFail("得点の集計", bets.error);
+    if (ps.error) dbFail("参加者の取得", ps.error);
+    const sum = new Map<string, number>();
+    (bets.data ?? []).forEach(b => sum.set(b.participant_id, (sum.get(b.participant_id) ?? 0) + (b.score_gained ?? 0)));
+    const rows = (ps.data ?? []).map(p => ({ id: p.id, name: p.name, score: sum.get(p.id) ?? 0, updated_at: nowIso() }));
+    if (rows.length === 0) return;
+    const { error } = await sb.from("derby_participants").upsert(rows);
+    if (error) dbFail("得点の保存", error);
+}
+
+/**
+ * 着順確定（冪等）：status が racing の時だけ result に切り替え、勝った1回だけ採点する。
+ * 同時に複数の画面から呼ばれても二重採点しない。
+ */
+async function finalizeIfDue(sb: Supabase, game: GameRow, toleranceMs: number): Promise<boolean> {
+    if (game.status !== 'racing' || !game.race_started_at) return false;
+    const due = new Date(game.race_started_at).getTime() + computeRaceDurationMs(game.correct_order, game.current_race_index);
+    if (Date.now() < due - toleranceMs) return false;
+
+    const { data: won, error } = await sb.from("derby_games")
+        .update({ status: 'result', updated_at: nowIso() })
+        .eq("id", GAME_ID).eq("status", "racing").eq("current_race_index", game.current_race_index)
+        .select("id");
+    if (error) dbFail("着順確定", error);
+    if (!won || won.length === 0) return false; // 他の画面が先に確定済み
+
+    // 現在レースの全馬券を採点
+    const { data: bets, error: betErr } = await sb.from("derby_bets").select("*")
+        .eq("game_id", GAME_ID).eq("race_index", game.current_race_index);
+    if (betErr) dbFail("馬券の取得", betErr);
+    const scored = ((bets ?? []) as BetRow[]).map(b => ({ ...b, score_gained: judgeBet(b.bet_order, game.correct_order).score }));
+    if (scored.length > 0) {
+        const { error: upErr } = await sb.from("derby_bets").upsert(scored);
+        if (upErr) dbFail("採点の保存", upErr);
+    }
+    await recomputeTotals(sb);
+    return true;
+}
+
+/** 画面に返すスナップショット。幹事以外には、投票受付中の正解着順を渡さない */
+async function buildSnapshot(sb: Supabase, host: boolean) {
+    let game = await getGame(sb);
+    // ゴール時刻を2秒以上過ぎても確定していなければ、ここで確定（幹事・スクリーンが閉じていても進む）
+    if (await finalizeIfDue(sb, game, -2000)) game = await getGame(sb);
+
+    const races = await getRaces(sb);
+    const raceIdx = Math.min(game.current_race_index, Math.max(0, races.length - 1));
+    const [ps, bets] = await Promise.all([
+        sb.from("derby_participants").select("id, name, score").order("score", { ascending: false }),
+        sb.from("derby_bets").select("participant_id, bet_order").eq("game_id", GAME_ID).eq("race_index", raceIdx)
+    ]);
+    if (ps.error) dbFail("参加者の取得", ps.error);
+    if (bets.error) dbFail("馬券の取得", bets.error);
+    const betMap = new Map((bets.data ?? []).map(b => [b.participant_id, b.bet_order as number[]]));
+
+    const revealOrder = host || game.status !== 'idle';
+    const startedAt = game.race_started_at ? new Date(game.race_started_at).getTime() : null;
+    return {
+        serverNow: Date.now(),
+        version: new Date(game.updated_at).getTime(),
+        isHost: host,
+        game: {
+            status: game.status,
+            currentRaceIndex: raceIdx,
+            correctOrder: revealOrder ? game.correct_order : null,
+            raceStartedAt: startedAt,
+            raceDurationMs: game.status === 'racing' || game.status === 'result'
+                ? computeRaceDurationMs(game.correct_order, raceIdx) : null
+        },
+        races: races.map((r, i) => ({
+            id: r.id, roundIndex: i, name: r.name, question: r.question, options: r.options,
+            correctOrder: host ? r.correct_order : []
+        })),
+        participants: (ps.data ?? []).map(p => ({ id: p.id, name: p.name, score: p.score ?? 0, betSlip: betMap.get(p.id) ?? null }))
+    };
+}
+
+function ok(data: unknown, extra: Record<string, unknown> = {}) {
+    return NextResponse.json({ success: true, data, ...extra }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
+function fail(err: unknown) {
+    if (err instanceof ApiError) return NextResponse.json({ success: false, error: err.message }, { status: err.status });
+    console.error("Trifecta API error:", err);
+    return NextResponse.json({ success: false, error: "サーバーエラーが発生しました" }, { status: 500 });
+}
+
+// ---------------------------------------------------------------------
+// GET
+// ---------------------------------------------------------------------
+export async function GET(request: NextRequest) {
     try {
-        const supabase = createServiceClient();
-
-        // 1. ゲーム状態取得
-        let { data: game, error: gameError } = await supabase
-            .from("derby_games")
-            .select("*")
-            .eq("id", "derby_current")
-            .maybeSingle();
-
-        if (gameError) {
-            console.error("derby_games fetch error:", gameError);
-        }
-
-        if (!game) {
-            const { data: newGame, error: insertGameErr } = await supabase
-                .from("derby_games")
-                .insert({
-                    id: "derby_current",
-                    current_race_index: 0,
-                    status: "idle",
-                    correct_order: [6, 4, 0]
-                })
-                .select()
-                .single();
-            if (insertGameErr) console.error("derby_games insert error:", insertGameErr);
-            game = newGame;
-        }
-
-        // 2. レースデータ取得（未登録なら初期レースを挿入）
-        let { data: racesData, error: racesError } = await supabase
-            .from("derby_races")
-            .select("*")
-            .order("round_index", { ascending: true });
-
-        if (racesError) console.error("derby_races fetch error:", racesError);
-
-        if (!racesData || racesData.length === 0) {
-            for (const r of DEFAULT_RACES) {
-                await supabase.from("derby_races").upsert({
-                    id: r.id,
-                    round_index: r.roundIndex,
-                    name: r.name,
-                    question: r.question,
-                    options: r.options,
-                    correct_order: r.correctOrder
-                });
-            }
-            const { data: seededRaces } = await supabase
-                .from("derby_races")
-                .select("*")
-                .order("round_index", { ascending: true });
-            racesData = seededRaces;
-        }
-
-        const races = (racesData && racesData.length > 0)
-            ? racesData.map(r => ({
-                id: r.id,
-                roundIndex: r.round_index,
-                name: r.name,
-                question: r.question,
-                options: r.options,
-                correctOrder: r.correct_order
-            }))
-            : DEFAULT_RACES;
-
-        // 3. 参加者データ取得
-        const { data: participantsData, error: participantsErr } = await supabase
-            .from("derby_participants")
-            .select("id, name, score")
-            .order("score", { ascending: false });
-
-        if (participantsErr) console.error("derby_participants fetch error:", participantsErr);
-
-        // 4. 現在のレースの投票データ取得
-        const currentRaceIndex = game?.current_race_index ?? 0;
-        const { data: betsData, error: betsErr } = await supabase
-            .from("derby_bets")
-            .select("participant_id, participant_name, bet_order, race_index, score_gained")
-            .eq("game_id", "derby_current")
-            .eq("race_index", currentRaceIndex);
-
-        if (betsErr) console.error("derby_bets fetch error:", betsErr);
-
-        // 参加者リストに現在のレースの betSlip を紐付け
-        const betMap = new Map<string, number[]>();
-        if (betsData) {
-            betsData.forEach(b => {
-                betMap.set(b.participant_id, b.bet_order);
-            });
-        }
-
-        const participants = (participantsData || []).map(p => ({
-            id: p.id,
-            name: p.name,
-            score: p.score ?? 0,
-            betSlip: betMap.get(p.id) || null
-        }));
-
-        return NextResponse.json({
-            success: true,
-            data: {
-                game: {
-                    status: game?.status || 'idle',
-                    currentRaceIndex: game?.current_race_index ?? 0,
-                    correctOrder: game?.correct_order || [6, 4, 0]
-                },
-                races,
-                participants
-            }
-        });
+        const sb = createServiceClient();
+        return ok(await buildSnapshot(sb, isHost(request)));
     } catch (err) {
-        console.error("Trifecta GET error:", err);
-        return NextResponse.json({ success: false, error: "サーバーエラーが発生しました" }, { status: 500 });
+        return fail(err);
     }
 }
 
-// POST: 参加登録・投票・管理進行等のDB更新
+// ---------------------------------------------------------------------
+// POST
+// ---------------------------------------------------------------------
 export async function POST(request: NextRequest) {
     try {
         const body = await request.json();
-        const { type } = body;
-        const supabase = createServiceClient();
+        const type: string = body?.type;
+        const sb = createServiceClient();
+        const host = isHost(request);
 
-        // ----------------------------------------------------
-        // 1. 参加登録 (type: 'join')
-        // ----------------------------------------------------
+        // ---------------- 誰でも実行できる操作 ----------------
         if (type === 'join') {
-            const { participantId, name } = body;
-            if (!participantId || !name || typeof name !== 'string') {
-                return NextResponse.json({ success: false, error: "パラメータが不正です" }, { status: 400 });
-            }
-            const cleanName = name.trim().slice(0, 30);
-            if (!cleanName) {
-                return NextResponse.json({ success: false, error: "名前を入力してください" }, { status: 400 });
-            }
-
-            // 既存参加者なら名前のみ更新、新規ならスコア0で登録
-            const { data: existing } = await supabase
-                .from("derby_participants")
-                .select("id, score")
-                .eq("id", participantId)
-                .maybeSingle();
-
-            if (existing) {
-                await supabase
-                    .from("derby_participants")
-                    .update({ name: cleanName, updated_at: new Date().toISOString() })
-                    .eq("id", participantId);
-            } else {
-                await supabase
-                    .from("derby_participants")
-                    .insert({ id: participantId, name: cleanName, score: 0 });
-            }
-
-            return NextResponse.json({ success: true, participant: { id: participantId, name: cleanName, score: existing?.score ?? 0 } });
+            const participantId = String(body.participantId || '').slice(0, 64);
+            const name = String(body.name || '').trim().slice(0, 30);
+            if (!participantId || !name) throw new ApiError(400, "名前を入力してください");
+            const { data: existing, error } = await sb.from("derby_participants").select("id").eq("id", participantId).maybeSingle();
+            if (error) dbFail("参加登録", error);
+            const res = existing
+                ? await sb.from("derby_participants").update({ name, updated_at: nowIso() }).eq("id", participantId)
+                : await sb.from("derby_participants").insert({ id: participantId, name, score: 0 });
+            if (res.error && res.error.code !== '23505') dbFail("参加登録", res.error);
+            return ok(await buildSnapshot(sb, host));
         }
 
-        // ----------------------------------------------------
-        // 2. 投票登録 (type: 'bet')
-        // ----------------------------------------------------
         if (type === 'bet') {
-            const { participantId, name, betOrder, raceIndex } = body;
-            if (!participantId || !Array.isArray(betOrder) || betOrder.length !== 3) {
-                return NextResponse.json({ success: false, error: "投票内容が不正です" }, { status: 400 });
+            const participantId = String(body.participantId || '').slice(0, 64);
+            const name = String(body.name || '').trim().slice(0, 30) || 'ゲスト';
+            const { betOrder, raceIndex } = body;
+            if (!participantId || !isValidOrder(betOrder)) throw new ApiError(400, "投票内容が不正です");
+
+            // 受付中の現在レースにだけ投票できる（発走後・レース切替後は拒否）
+            const game = await getGame(sb);
+            if (game.status !== 'idle' || game.current_race_index !== raceIndex) {
+                throw new ApiError(409, "このレースの投票受付は終了しています");
             }
-
-            // 参加者レコードが存在することを確認（なければ自動作成）
-            const { data: part } = await supabase
-                .from("derby_participants")
-                .select("id")
-                .eq("id", participantId)
-                .maybeSingle();
-
+            const { data: part, error: pErr } = await sb.from("derby_participants").select("id").eq("id", participantId).maybeSingle();
+            if (pErr) dbFail("参加者の確認", pErr);
             if (!part) {
-                await supabase.from("derby_participants").insert({
-                    id: participantId,
-                    name: (name || 'ゲスト').slice(0, 30),
-                    score: 0
-                });
+                const { error } = await sb.from("derby_participants").insert({ id: participantId, name, score: 0 });
+                if (error && error.code !== '23505') dbFail("参加登録", error);
             }
-
-            // 投票を UPSERT
-            const { error: betErr } = await supabase
-                .from("derby_bets")
-                .upsert(
-                    {
-                        game_id: "derby_current",
-                        race_index: raceIndex,
-                        participant_id: participantId,
-                        participant_name: (name || 'ゲスト').slice(0, 30),
-                        bet_order: betOrder,
-                        score_gained: 0
-                    },
-                    { onConflict: 'game_id,race_index,participant_id' }
-                );
-
-            if (betErr) {
-                console.error("derby_bets upsert error:", betErr);
-                return NextResponse.json({ success: false, error: "投票の保存に失敗しました" }, { status: 500 });
-            }
-
-            return NextResponse.json({ success: true });
+            // 1レース1回（上書き不可）。2回目は「投票済み」として現在の内容を返す
+            const { error: betErr } = await sb.from("derby_bets").insert({
+                game_id: GAME_ID, race_index: raceIndex, participant_id: participantId,
+                participant_name: name, bet_order: betOrder, score_gained: 0
+            });
+            if (betErr && betErr.code !== '23505') dbFail("投票の保存", betErr);
+            return ok(await buildSnapshot(sb, host), { duplicate: betErr?.code === '23505' });
         }
 
-        // ----------------------------------------------------
-        // 3. ゲーム状態更新 (type: 'update_game')
-        // ----------------------------------------------------
-        if (type === 'update_game') {
-            const { status, currentRaceIndex, correctOrder } = body;
-            const updateData: Record<string, unknown> = { updated_at: new Date().toISOString() };
-            if (status !== undefined) updateData.status = status;
-            if (currentRaceIndex !== undefined) updateData.current_race_index = currentRaceIndex;
-            if (correctOrder !== undefined) updateData.correct_order = correctOrder;
-
-            const { error: updErr } = await supabase
-                .from("derby_games")
-                .update(updateData)
-                .eq("id", "derby_current");
-
-            if (updErr) {
-                console.error("derby_games update error:", updErr);
-                return NextResponse.json({ success: false, error: "状態更新に失敗しました" }, { status: 500 });
-            }
-
-            return NextResponse.json({ success: true });
-        }
-
-        // ----------------------------------------------------
-        // 4. 問題保存 (type: 'save_races')
-        // ----------------------------------------------------
-        if (type === 'save_races') {
-            const { races } = body as { races: DerbyRaceInput[] };
-            if (Array.isArray(races)) {
-                for (const r of races) {
-                    await supabase.from("derby_races").upsert({
-                        id: r.id,
-                        round_index: r.roundIndex,
-                        name: r.name,
-                        question: r.question,
-                        options: r.options,
-                        correct_order: r.correctOrder,
-                        updated_at: new Date().toISOString()
-                    });
-                }
-            }
-            return NextResponse.json({ success: true });
-        }
-
-        // ----------------------------------------------------
-        // 5. 着順確定 ＆ 得点集計 (type: 'finalize_race')
-        // ----------------------------------------------------
         if (type === 'finalize_race') {
-            const { raceIndex, correctOrder } = body;
-            if (typeof raceIndex !== 'number' || !Array.isArray(correctOrder)) {
-                return NextResponse.json({ success: false, error: "パラメータが不正です" }, { status: 400 });
-            }
-
-            // 該当レースの全投票を取得
-            const { data: bets } = await supabase
-                .from("derby_bets")
-                .select("id, participant_id, bet_order")
-                .eq("game_id", "derby_current")
-                .eq("race_index", raceIndex);
-
-            // 各投票の獲得得点を計算して更新
-            if (bets && bets.length > 0) {
-                for (const b of bets) {
-                    const gained = calculateBetScore(b.bet_order, correctOrder);
-                    await supabase
-                        .from("derby_bets")
-                        .update({ score_gained: gained })
-                        .eq("id", b.id);
-                }
-            }
-
-            // 全参加者の累計スコアを集計して更新
-            const { data: allBets } = await supabase
-                .from("derby_bets")
-                .select("participant_id, score_gained")
-                .eq("game_id", "derby_current");
-
-            const scoreMap = new Map<string, number>();
-            if (allBets) {
-                allBets.forEach(b => {
-                    scoreMap.set(b.participant_id, (scoreMap.get(b.participant_id) || 0) + (b.score_gained || 0));
-                });
-            }
-
-            const { data: allParticipants } = await supabase
-                .from("derby_participants")
-                .select("id");
-
-            if (allParticipants) {
-                for (const p of allParticipants) {
-                    const totalScore = scoreMap.get(p.id) || 0;
-                    await supabase
-                        .from("derby_participants")
-                        .update({ score: totalScore, updated_at: new Date().toISOString() })
-                        .eq("id", p.id);
-                }
-            }
-
-            // ゲーム状態を result に更新
-            await supabase
-                .from("derby_games")
-                .update({
-                    status: "result",
-                    correct_order: correctOrder,
-                    updated_at: new Date().toISOString()
-                })
-                .eq("id", "derby_current");
-
-            return NextResponse.json({ success: true });
+            // ゴール時刻（±2秒の時計ずれを許容）を過ぎていれば誰でも確定を依頼できる。早すぎる依頼は無視
+            const game = await getGame(sb);
+            await finalizeIfDue(sb, game, 2000);
+            return ok(await buildSnapshot(sb, host));
         }
 
-        // ----------------------------------------------------
-        // 6. 現在レースの再投票 (type: 'rebet')
-        // ----------------------------------------------------
-        if (type === 'rebet') {
-            const { raceIndex } = body;
-            await supabase
-                .from("derby_bets")
-                .delete()
-                .eq("game_id", "derby_current")
-                .eq("race_index", raceIndex);
-
-            await supabase
-                .from("derby_games")
-                .update({ status: "idle", updated_at: new Date().toISOString() })
-                .eq("id", "derby_current");
-
-            return NextResponse.json({ success: true });
+        if (type === 'verify_host' || type === 'verify') {
+            const pw = body.password || request.headers.get("x-host-password");
+            const expected = process.env.HOST_PASSWORD;
+            if (!expected || pw !== expected) {
+                throw new ApiError(401, "パスワードが正しくありません");
+            }
+            return ok(await buildSnapshot(sb, true));
         }
 
-        // ----------------------------------------------------
-        // 7. 全スコアリセット (type: 'reset_tournament')
-        // ----------------------------------------------------
-        if (type === 'reset_tournament') {
-            await supabase
-                .from("derby_bets")
-                .delete()
-                .eq("game_id", "derby_current");
+        // ---------------- ここから幹事のみ ----------------
+        if (!host) throw new ApiError(401, "幹事ログインが必要です");
 
-            await supabase
-                .from("derby_participants")
-                .update({ score: 0, updated_at: new Date().toISOString() })
-                .neq("id", "");
+        const game = await getGame(sb);
+        const races = await getRaces(sb);
+        const notRacing = () => {
+            if (game.status === 'racing') throw new ApiError(409, "レース中は操作できません");
+        };
 
-            await supabase
-                .from("derby_games")
-                .update({
-                    status: "idle",
-                    current_race_index: 0,
-                    correct_order: [6, 4, 0],
-                    updated_at: new Date().toISOString()
-                })
-                .eq("id", "derby_current");
-
-            return NextResponse.json({ success: true });
+        if (type === 'start_race') {
+            if (game.status !== 'idle') throw new ApiError(409, "投票受付中のレースだけ発走できます（結果表示中は「次のレースへ」か「再投票」）");
+            if (!isValidOrder(game.correct_order)) throw new ApiError(400, "正解着順を設定してください");
+            await updateGame(sb, { status: 'racing', race_started_at: nowIso() });
+            return ok(await buildSnapshot(sb, true));
         }
 
-        return NextResponse.json({ success: false, error: "未対応の操作です" }, { status: 400 });
+        if (type === 'set_correct_order') {
+            notRacing();
+            const { correctOrder } = body;
+            if (!isValidOrder(correctOrder)) throw new ApiError(400, "正解着順は重複なしで3つ選んでください");
+            await updateGame(sb, { correct_order: correctOrder });
+            const race = races[game.current_race_index];
+            if (race) {
+                const { error } = await sb.from("derby_races").update({ correct_order: correctOrder, updated_at: nowIso() }).eq("id", race.id);
+                if (error) dbFail("正解着順の保存", error);
+            }
+            return ok(await buildSnapshot(sb, true));
+        }
+
+        if (type === 'go_to_race' || type === 'set_race_index') {
+            notRacing();
+            const idx = Number(body.raceIndex ?? body.index);
+            const race = races[idx];
+            if (!Number.isInteger(idx) || !race) throw new ApiError(400, "レースが見つかりません");
+            await updateGame(sb, {
+                status: 'idle', current_race_index: idx, race_started_at: null,
+                correct_order: isValidOrder(race.correct_order) ? race.correct_order : [0, 1, 2]
+            });
+            return ok(await buildSnapshot(sb, true));
+        }
+
+        if (type === 'rebet' || type === 'reset_race') {
+            notRacing();
+            // このレースの馬券を消し、加算済みの得点も作り直して戻す
+            const { error } = await sb.from("derby_bets").delete().eq("game_id", GAME_ID).eq("race_index", game.current_race_index);
+            if (error) dbFail("馬券の取り消し", error);
+            await recomputeTotals(sb);
+            await updateGame(sb, { status: 'idle', race_started_at: null });
+            return ok(await buildSnapshot(sb, true));
+        }
+
+        if (type === 'reset_tournament' || type === 'reset_all') {
+            notRacing();
+            const del = await sb.from("derby_bets").delete().eq("game_id", GAME_ID);
+            if (del.error) dbFail("馬券の削除", del.error);
+            const sc = await sb.from("derby_participants").update({ score: 0, updated_at: nowIso() }).neq("id", "");
+            if (sc.error) dbFail("得点のリセット", sc.error);
+            await updateGame(sb, {
+                status: 'idle', current_race_index: 0, race_started_at: null,
+                correct_order: isValidOrder(races[0]?.correct_order) ? races[0].correct_order : [0, 1, 2]
+            });
+            return ok(await buildSnapshot(sb, true));
+        }
+
+        if (type === 'grand_finale' || (type === 'set_status' && body.status === 'grand_finale')) {
+            notRacing();
+            await updateGame(sb, { status: 'grand_finale' });
+            return ok(await buildSnapshot(sb, true));
+        }
+
+        if (type === 'close_finale' || (type === 'set_status' && body.status === 'result')) {
+            if (game.status !== 'grand_finale') return ok(await buildSnapshot(sb, true));
+            // 走り終えたレースなら結果表示へ、まだ走っていなければ投票受付へ戻す
+            await updateGame(sb, { status: game.race_started_at ? 'result' : 'idle' });
+            return ok(await buildSnapshot(sb, true));
+        }
+
+        if (type === 'save_races') {
+            notRacing();
+            const input = body.races as DerbyRaceInput[];
+            if (!Array.isArray(input) || input.length === 0) throw new ApiError(400, "レースが1つもありません");
+            const existing = new Map(races.map(r => [r.id, r]));
+            const liveId = races[game.current_race_index]?.id;
+            const rows = input.map((r, i) => {
+                const id = String(r.id || `race_${Date.now().toString(36)}_${i}`).slice(0, 64);
+                const options = Array.from({ length: OPTION_COUNT }, (_, k) => String(r.options?.[k] ?? '').trim().slice(0, 60) || `選択肢${'ABCDEFGH'[k]}`);
+                const prev = existing.get(id);
+                return {
+                    id,
+                    round_index: i,
+                    name: String(r.name || '').trim().slice(0, 60) || `第${i + 1}R`,
+                    question: String(r.question || '').trim().slice(0, 200) || '（設問未入力）',
+                    options,
+                    // 正解着順は「当日進行」で設定する。ここでは既存の値を保持（新規は A→B→C）
+                    correct_order: prev && isValidOrder(prev.correct_order) ? prev.correct_order : [0, 1, 2],
+                    updated_at: nowIso()
+                };
+            });
+            const { error: upErr } = await sb.from("derby_races").upsert(rows);
+            if (upErr) dbFail("問題の保存", upErr);
+            const keepIds = new Set(rows.map(r => r.id));
+            const removed = races.filter(r => !keepIds.has(r.id)).map(r => r.id);
+            if (removed.length > 0) {
+                const { error } = await sb.from("derby_races").delete().in("id", removed);
+                if (error) dbFail("レースの削除", error);
+            }
+            // 進行中レースの番号を並べ替え後の位置に合わせる
+            const newLive = rows.findIndex(r => r.id === liveId);
+            if (newLive >= 0 && newLive !== game.current_race_index) {
+                await updateGame(sb, { current_race_index: newLive });
+            } else if (newLive < 0) {
+                const idx = Math.min(game.current_race_index, rows.length - 1);
+                await updateGame(sb, { current_race_index: idx, status: 'idle', race_started_at: null, correct_order: rows[idx].correct_order });
+            }
+            return ok(await buildSnapshot(sb, true));
+        }
+
+        throw new ApiError(400, "未対応の操作です");
     } catch (err) {
-        console.error("Trifecta POST error:", err);
-        return NextResponse.json({ success: false, error: "サーバーエラーが発生しました" }, { status: 500 });
+        return fail(err);
     }
 }

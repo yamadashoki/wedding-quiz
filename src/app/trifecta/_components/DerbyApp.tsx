@@ -3,10 +3,13 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
 import { supabase } from '@/lib/supabase';
+import {
+    advanceSimTo, computeWinOdds, createSimState, formatOdds, judgeBet, ranksOf, scenarioOf,
+    FINISH_Z, RACE_START_Z, SCORE_RULES, type BetOrder, type BetRankType, type SimState
+} from '@/lib/derby-core';
 
 // ==============================================================
-// アイコン（lucide-react 互換の見た目をインラインSVGで定義）
-// 外部パッケージ lucide-react に依存しないため、未インストールでも動作する
+// アイコン（lucide-react 互換の見た目をインラインSVGで定義。外部パッケージ不要）
 // ==============================================================
 type IconProps = { className?: string };
 const IconBase = ({ className, children }: IconProps & { children: React.ReactNode }) => (
@@ -62,13 +65,6 @@ const Play = (p: IconProps) => (
         <polygon points="6 3 20 12 6 21 6 3" />
     </IconBase>
 );
-const Database = (p: IconProps) => (
-    <IconBase {...p}>
-        <ellipse cx="12" cy="5" rx="9" ry="3" />
-        <path d="M3 5v14a9 3 0 0 0 18 0V5" />
-        <path d="M3 12a9 3 0 0 0 18 0" />
-    </IconBase>
-);
 const LayoutGrid = (p: IconProps) => (
     <IconBase {...p}>
         <rect x="3" y="3" width="7" height="7" rx="1" />
@@ -86,12 +82,11 @@ const AlertTriangle = (p: IconProps) => (
 );
 
 // ==============================================================
-// 型定義（strict TypeScript で next build を通すため）
+// 型定義
 // ==============================================================
 type GameStatus = 'idle' | 'racing' | 'result' | 'grand_finale';
 type DerbyRoute = 'multiview' | 'play' | 'screen' | 'host';
 type AdminSubTab = 'live' | 'edit';
-type BetOrder = number[]; // [1着Idx, 2着Idx, 3着Idx]
 
 interface DerbyRace {
     id: string;
@@ -99,16 +94,16 @@ interface DerbyRace {
     name: string;
     question: string;
     options: string[];
-    correctOrder: BetOrder;
+    correctOrder: BetOrder; // 幹事以外には空配列で届く
 }
 
 interface HorseData {
     num: number;
     letter: string;
     name: string;
-    odds: string;
-    color: string;
-    jockeyColor: string;
+    color: string;       // 枠色（勝負服・ゼッケン地）
+    jockeyColor: string; // ヘルメット・胴
+    textColor: string;   // ゼッケン文字色（1番Aは白地なので濃紺。実際の競馬の1枠と同じ）
 }
 
 interface HorseObject {
@@ -119,43 +114,46 @@ interface HorseObject {
         tail: THREE.Mesh; head: THREE.Mesh;
     };
     badge: THREE.Object3D;
-    currentSpeed: number;
-    baseLaneX: number;
-    currentLaneX: number;
-    targetLaneX: number;
-    progressZ: number;
-    finished: boolean;
 }
 
 interface Participant {
     id: string;
     name: string;
     score: number;
-    betSlip: BetOrder | null;
-    isMock?: boolean;
+    betSlip: BetOrder | null; // 現在レースの馬券
 }
 
 interface ConfirmDialogState {
     isOpen: boolean;
     title: string;
     message: string;
+    confirmLabel?: string;
+    danger?: boolean;
     onConfirm: (() => void) | null;
 }
 
-interface GameStatePayload {
-    status: GameStatus;
-    currentRaceIndex: number;
-    correctOrder: BetOrder;
-    // 幹事画面（正の情報源）からのみ付与：問題データと全参加者の得点表
-    races?: DerbyRace[];
-    leaderboard?: Participant[];
-    // 発走ごとに幹事が発行する一意ID（同じ発走の重複受信でレースを巻き戻さないため）
-    runId?: string;
+/** /api/trifecta が返す状態（DB が唯一の正） */
+interface Snapshot {
+    serverNow: number;
+    version: number;
+    isHost: boolean;
+    game: {
+        status: GameStatus;
+        currentRaceIndex: number;
+        correctOrder: BetOrder | null; // 投票受付中は幹事以外 null
+        raceStartedAt: number | null;  // 発走時刻（サーバー時刻ms）
+        raceDurationMs: number | null; // 発走から着順確定まで
+    };
+    races: DerbyRace[];
+    participants: Participant[];
 }
 
-interface JoinPayload {
-    participantId: string;
-    name: string;
+interface ApiResult {
+    ok: boolean;
+    status: number;
+    error?: string;
+    data?: Snapshot;
+    duplicate?: boolean;
 }
 
 // 画面の役割（URLごとに1つ）
@@ -170,163 +168,43 @@ export interface DerbyAppProps {
     basePath?: string;
 }
 
-// Supabase 接続情報は環境変数から読む（.env.local）。
-// Next.js はビルド時にこの2つの文字列を埋め込む。process がない環境（claude.ai プレビュー等）では空文字。
-const ENV_SUPABASE_URL = (() => {
-    try { return process.env.NEXT_PUBLIC_SUPABASE_URL || ''; } catch { return ''; }
-})();
-const ENV_SUPABASE_KEY = (() => {
-    try { return process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''; } catch { return ''; }
-})();
-
-interface BetPayload {
-    participantId: string;
-    name: string;
-    betOrder: BetOrder;
-    raceIndex: number;
-}
-
-// CDN経由で読み込む supabase-js の最小型（npm 依存を増やさないため）
-interface RealtimeChannelLike {
-    on: (type: string, filter: { event: string }, cb: (msg: { payload: unknown }) => void) => RealtimeChannelLike;
-    subscribe: (cb?: (status: string) => void) => RealtimeChannelLike;
-    send: (msg: { type: string; event: string; payload: unknown }) => Promise<unknown>;
-}
-interface SupabaseClientLike {
-    channel: (name: string) => RealtimeChannelLike;
-    removeChannel: (ch: RealtimeChannelLike) => unknown;
-    from: (table: string) => { insert: (rows: Record<string, unknown>[]) => Promise<unknown> };
-}
-
-// declare global は環境によってトランスパイルできないため、型付きキャストで参照する
 interface WindowWithExtras {
-    supabase?: { createClient: (url: string, key: string) => SupabaseClientLike };
     webkitAudioContext?: typeof AudioContext;
 }
 const getWin = () => window as unknown as Window & WindowWithExtras;
 
-const RACE_START_Z = 0;
-const FINISH_Z = -1000;
-const INITIAL_COMMENTARY = '第4コーナーを回って各馬一斉に最後の直線コースへ入る！';
-// ==============================================================
-// 3連単アンケートゲーム：初期レースデータ（全3R構成・選択肢A〜H）
-// ==============================================================
-const DEFAULT_DERBY_RACES: DerbyRace[] = [
-    {
-        id: "race_1",
-        roundIndex: 0,
-        name: "第1R：新婦の手料理杯",
-        question: "新郎が一生涯食べ続けたい「新婦の手料理No.1」は？",
-        options: [
-            "特製ハンバーグ",
-            "特製オムライス",
-            "特製肉じゃが",
-            "カレーライス",
-            "絶品唐揚げ",
-            "特製お味噌汁",
-            "特製デザート",
-            "まだ作ってもらってない"
-        ],
-        correctOrder: [6, 4, 0] // 1着: G(デザート), 2着: E(唐揚げ), 3着: A(ハンバーグ)
-    },
-    {
-        id: "race_2",
-        roundIndex: 1,
-        name: "第2R：新郎の直してほしいところ特別",
-        question: "新婦が告白！「新郎のここだけは直してほしいところ」は？",
-        options: [
-            "夜中の大爆音いびき",
-            "休日に昼過ぎまで爆睡",
-            "脱いだ靴下丸めて放置",
-            "ゲーム中に返事しない",
-            "急な筋肉自慢アピール",
-            "記念日や約束を忘れがち",
-            "優しすぎて優柔不断",
-            "非の打ち所なし（神）"
-        ],
-        correctOrder: [0, 2, 4] // 1着: A, 2着: C, 3着: E
-    },
-    {
-        id: "race_3",
-        roundIndex: 2,
-        name: "第3R：二人の思い出ステークス（最終戦）",
-        question: "新郎新婦が選ぶ「一番思い出に残っているデートスポット」は？",
-        options: [
-            "初デートの水族館",
-            "雨の東京ディズニーランド",
-            "二人で行った沖縄旅行",
-            "近所のいつもの居酒屋",
-            "夜景を見に行った展望台",
-            "ドライブで行った富士山",
-            "おうち映画鑑賞会",
-            "プロポーズした高級ホテル"
-        ],
-        correctOrder: [2, 7, 0] // 1着: C, 2着: H, 3着: A
-    }
-];
+const INITIAL_COMMENTARY = '各馬ゲートイン完了！まもなく発走です！';
+const HOST_PW_KEY = 'derby_host_password';
 
 const HORSES_DATA: HorseData[] = [
-    { num: 1, letter: "A", name: "サイバーヒー", odds: "14.2", color: "#e2e8f0", jockeyColor: "#cbd5e1" },
-    { num: 2, letter: "B", name: "コニーティーチャン", odds: "5.8", color: "#334155", jockeyColor: "#1e293b" },
-    { num: 3, letter: "C", name: "スッポンスポロクス", odds: "8.4", color: "#dc2626", jockeyColor: "#b91c1c" },
-    { num: 4, letter: "D", name: "ジェッドムリサイズ", odds: "19.3", color: "#2563eb", jockeyColor: "#1d4ed8" },
-    { num: 5, letter: "E", name: "マッスル唐揚げ（屈強男）", odds: "4.1", color: "#d97706", jockeyColor: "#b45309" },
-    { num: 6, letter: "F", name: "アキネイヅミツデス", odds: "45.0", color: "#059669", jockeyColor: "#047857" },
-    { num: 7, letter: "G", name: "シューマッスルズシ", odds: "2.3", color: "#ea580c", jockeyColor: "#c2410c" },
-    { num: 8, letter: "H", name: "ヒメオマンパルスタ", odds: "7.6", color: "#be185d", jockeyColor: "#9d174d" }
+    { num: 1, letter: "A", name: "サイバーヒー", color: "#e2e8f0", jockeyColor: "#cbd5e1", textColor: "#0f172a" },
+    { num: 2, letter: "B", name: "コニーティーチャン", color: "#334155", jockeyColor: "#1e293b", textColor: "#ffffff" },
+    { num: 3, letter: "C", name: "スッポンスポロクス", color: "#dc2626", jockeyColor: "#b91c1c", textColor: "#ffffff" },
+    { num: 4, letter: "D", name: "ジェッドムリサイズ", color: "#2563eb", jockeyColor: "#1d4ed8", textColor: "#ffffff" },
+    { num: 5, letter: "E", name: "マッスル唐揚げ（屈強男）", color: "#d97706", jockeyColor: "#b45309", textColor: "#ffffff" },
+    { num: 6, letter: "F", name: "アキネイヅミツデス", color: "#059669", jockeyColor: "#047857", textColor: "#ffffff" },
+    { num: 7, letter: "G", name: "シューマッスルズシ", color: "#ea580c", jockeyColor: "#c2410c", textColor: "#ffffff" },
+    { num: 8, letter: "H", name: "ヒメオマンパルスタ", color: "#be185d", jockeyColor: "#9d174d", textColor: "#ffffff" }
 ];
 
-// ==============================================================
-// 3連単専用 Supabase テーブル作成 SQL（アンケートビンゴとは完全分離）
-// ==============================================================
-const SUPABASE_DERBY_SCHEMA_SQL = `-- 3連単アンケートゲーム専用 DDL (supabase/migrations/derby_schema.sql)
--- 既存のアンケートビンゴ用テーブルには一切干渉しません
+/** 枠番チップ（A〜H）の共通スタイル。A だけ濃紺文字＋縁取り */
+const chipStyle = (h: HorseData): React.CSSProperties => ({
+    backgroundColor: h.color,
+    color: h.textColor,
+    boxShadow: h.letter === 'A' ? 'inset 0 0 0 1.5px #64748b' : undefined
+});
 
--- 1. ゲーム進行状態テーブル
-create table if not exists public.derby_games (
-  id text primary key default 'derby_current',
-  current_race_index int default 0,
-  status text default 'idle', -- 'idle' | 'racing' | 'result' | 'grand_finale'
-  correct_order int[] default array[6, 4, 0],
-  updated_at timestamp with time zone default timezone('utc'::text, now())
-);
+// 役ごとの色（スマホの判定結果・スクリーンの的中者速報で共通）
+const RANK_STYLE: Record<BetRankType, { solid: string; soft: string; emoji: string }> = {
+    sanrentan: { solid: 'bg-amber-500 text-slate-950', soft: 'bg-amber-500/20 border-amber-500/40 text-amber-200', emoji: '👑' },
+    sanrenpuku: { solid: 'bg-emerald-500 text-slate-950', soft: 'bg-emerald-500/20 border-emerald-500/40 text-emerald-200', emoji: '✨' },
+    nirentan: { solid: 'bg-blue-500 text-white', soft: 'bg-blue-500/20 border-blue-500/40 text-blue-200', emoji: '🎯' },
+    bukubuku: { solid: 'bg-purple-500 text-white', soft: 'bg-purple-500/20 border-purple-500/40 text-purple-200', emoji: '🍀' },
+    tan: { solid: 'bg-teal-500 text-white', soft: 'bg-teal-500/20 border-teal-500/40 text-teal-200', emoji: '⚡️' },
+    none: { solid: 'bg-slate-800 text-slate-300', soft: 'bg-slate-800 border-slate-700 text-slate-300', emoji: '' }
+};
 
--- 2. レース問題・選択肢テーブル
-create table if not exists public.derby_races (
-  id text primary key,
-  round_index int not null,
-  name text not null,
-  question text not null,
-  options text[] not null,
-  correct_order int[] not null default array[0, 1, 2],
-  updated_at timestamp with time zone default timezone('utc'::text, now())
-);
-
--- 3. 参加者テーブル
-create table if not exists public.derby_participants (
-  id text primary key,
-  name text not null,
-  score int default 0,
-  updated_at timestamp with time zone default timezone('utc'::text, now())
-);
-
--- 4. 参加者馬券テーブル（ユニーク制約により同一レース重複投票をDB層で防止）
-create table if not exists public.derby_bets (
-  id uuid default gen_random_uuid() primary key,
-  game_id text not null default 'derby_current',
-  race_index int not null,
-  participant_id text not null,
-  participant_name text not null,
-  bet_order int[] not null, -- [1着選択肢Idx, 2着選択肢Idx, 3着選択肢Idx]
-  score_gained int default 0,
-  created_at timestamp with time zone default timezone('utc'::text, now()),
-  constraint unique_participant_per_race unique (race_index, participant_id)
-);
-
--- Realtime有効化
-alter publication supabase_realtime add table public.derby_games;
-alter publication supabase_realtime add table public.derby_bets;
-alter publication supabase_realtime add table public.derby_participants;`;
+const CLOSED_DIALOG: ConfirmDialogState = { isOpen: false, title: '', message: '', onConfirm: null };
 
 // ==============================================================
 // Web Audio API による合成音響エンジン（音声ファイル不要）
@@ -419,7 +297,10 @@ class SoundSynthesizer {
     }
 }
 
-function createSaddleTexture(letter: string, bgColor: string, textColor = "#000000"): THREE.CanvasTexture | null {
+// ==============================================================
+// 3D 素材（すべてコード生成。外部モデル・画像なし）
+// ==============================================================
+function createSaddleTexture(letter: string, bgColor: string, textColor: string): THREE.CanvasTexture | null {
     if (typeof document === 'undefined') return null;
     const cv = document.createElement("canvas");
     cv.width = 128;
@@ -428,10 +309,9 @@ function createSaddleTexture(letter: string, bgColor: string, textColor = "#0000
     if (!ctx) return null;
     ctx.fillStyle = bgColor;
     ctx.fillRect(0, 0, 128, 128);
-    ctx.strokeStyle = "#ffffff";
+    ctx.strokeStyle = textColor === '#ffffff' ? "#ffffff" : "#0f172a";
     ctx.lineWidth = 10;
     ctx.strokeRect(4, 4, 120, 120);
-    // 黒文字で大きく
     ctx.fillStyle = textColor;
     ctx.font = "bold 88px sans-serif";
     ctx.textAlign = "center";
@@ -440,29 +320,34 @@ function createSaddleTexture(letter: string, bgColor: string, textColor = "#0000
     return new THREE.CanvasTexture(cv);
 }
 
-function createLetterBadgeSprite(letter: string, bgColor: string): THREE.Object3D {
+/** 頭上の枠番バッジ。濃紺の外縁＋白リングで、芝・空・白い馬体の上でも輪郭が出る */
+function createLetterBadgeSprite(letter: string, bgColor: string, textColor: string): THREE.Object3D {
     if (typeof document === 'undefined') return new THREE.Group();
     const cv = document.createElement("canvas");
     cv.width = 128;
     cv.height = 128;
     const ctx = cv.getContext("2d");
     if (!ctx) return new THREE.Group();
+    ctx.fillStyle = "#0f172a";
+    ctx.beginPath();
+    ctx.arc(64, 64, 62, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(64, 64, 55, 0, Math.PI * 2);
+    ctx.fill();
     ctx.fillStyle = bgColor;
     ctx.beginPath();
-    ctx.arc(64, 64, 58, 0, Math.PI * 2);
+    ctx.arc(64, 64, 48, 0, Math.PI * 2);
     ctx.fill();
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 8;
-    ctx.stroke();
-    // 黒文字で大きく！
-    ctx.fillStyle = "#000000";
-    ctx.font = "900 80px sans-serif";
+    ctx.fillStyle = textColor;
+    ctx.font = "900 70px sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(letter, 64, 68);
 
     const tex = new THREE.CanvasTexture(cv);
-    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
+    const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, fog: false });
     const sprite = new THREE.Sprite(mat);
     sprite.scale.set(3.2, 3.2, 1);
     return sprite;
@@ -525,7 +410,7 @@ function buildLowPolyHorse(horseData: HorseData): HorseObject {
     const jockeyMat = new THREE.MeshLambertMaterial({ color: horseData.jockeyColor });
 
     const saddleMat = new THREE.MeshLambertMaterial({
-        map: createSaddleTexture(horseData.letter, horseData.color, "#000000")
+        map: createSaddleTexture(horseData.letter, horseData.color, horseData.textColor)
     });
 
     const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.5, 3.2), horseMat);
@@ -572,7 +457,7 @@ function buildLowPolyHorse(horseData: HorseData): HorseObject {
     helmet.castShadow = true;
     group.add(helmet);
 
-    const headBadge = createLetterBadgeSprite(horseData.letter, horseData.color);
+    const headBadge = createLetterBadgeSprite(horseData.letter, horseData.color, horseData.textColor);
     headBadge.position.set(0, 6.4, -1.2);
     group.add(headBadge);
 
@@ -610,13 +495,7 @@ function buildLowPolyHorse(horseData: HorseData): HorseObject {
         mesh: group,
         data: horseData,
         legs: { legFL, legFR, legBL, legBR, tail, head },
-        badge: headBadge,
-        currentSpeed: 1.0,
-        baseLaneX: 0,
-        currentLaneX: 0,
-        targetLaneX: 0,
-        progressZ: 0,
-        finished: false
+        badge: headBadge
     };
 }
 
@@ -645,326 +524,357 @@ function createTrackFence(xPos: number, trackLength: number): THREE.Group {
 }
 
 // ==============================================================
-// 得点計算
-// サンレンタン+6pt, サンレンプク+4pt, ニレンタン+3pt, プクプク+2pt, タン+1pt
+// 本体
+// 同期の考え方（「リロードしないと進まない」対策）
+//   ・進行状態は DB だけが正。どの画面も /api/trifecta の同じスナップショットを表示する
+//   ・リアルタイム配信は「更新があったよ」の合図だけ。取りこぼしても 2.5〜4 秒ごとの再取得で必ず追いつく
+//   ・レース映像は「発走時刻（サーバー時刻）からの経過秒」で決まる。途中から開いたスクリーンも同じ位置から映る
+//   ・着順確定はゴール時刻を過ぎたらサーバーが行う（スクリーン・幹事・誰かの再取得のどれか1つが届けば進む）
 // ==============================================================
-type BetRankResult = 'sanrentan' | 'sanrenpuku' | 'nirentan' | 'pukupuku' | 'tan' | 'none';
-
-interface BetDetail {
-    score: number;
-    type: BetRankResult;
-    badgeLabel: string;
-    description: string;
-}
-
-function getBetDetail(bet: BetOrder | null | undefined, correct: BetOrder | null | undefined): BetDetail {
-    if (!bet || bet.length < 3 || !correct || correct.length < 3) {
-        return { score: 0, type: 'none', badgeLabel: '未投票', description: '未投票でした' };
-    }
-
-    // 1. サンレンタン (+6pt): 1〜3着の着順が完全一致
-    if (bet[0] === correct[0] && bet[1] === correct[1] && bet[2] === correct[2]) {
-        return { score: 6, type: 'sanrentan', badgeLabel: 'サンレンタン+6pt', description: '🎉 サンレンタン完全的中 (+6pt)' };
-    }
-
-    // 2. サンレンプク (+4pt): 1〜3着の3頭を着順不問で的中
-    const sortedB = [...bet].sort((a, b) => a - b).join();
-    const sortedC = [...correct].sort((a, b) => a - b).join();
-    if (sortedB === sortedC) {
-        return { score: 4, type: 'sanrenpuku', badgeLabel: 'サンレンプク+4pt', description: '✨ サンレンプク的中 (+4pt)' };
-    }
-
-    // 3. ニレンタン (+3pt): 1着・2着を着順通り的中
-    if (bet[0] === correct[0] && bet[1] === correct[1]) {
-        return { score: 3, type: 'nirentan', badgeLabel: 'ニレンタン+3pt', description: '🎯 ニレンタン的中 (+3pt)' };
-    }
-
-    // 4. プクプク (+2pt): 正解の1着・2着の2頭を着順不問で含む
-    const top2 = new Set([correct[0], correct[1]]);
-    const matchedTop2 = bet.slice(0, 3).filter(x => top2.has(x));
-    if (matchedTop2.length >= 2) {
-        return { score: 2, type: 'pukupuku', badgeLabel: 'プクプク+2pt', description: '💫 プクプク的中 (+2pt)' };
-    }
-
-    // 5. タン (+1pt): 1着が的中
-    if (bet[0] === correct[0]) {
-        return { score: 1, type: 'tan', badgeLabel: 'タン+1pt', description: '🏇 タン的中 (+1pt)' };
-    }
-
-    return { score: 0, type: 'none', badgeLabel: '不的中', description: '不的中でした' };
-}
-
-function calculateBetScore(bet: BetOrder | null | undefined, correct: BetOrder | null | undefined): number {
-    return getBetDetail(bet, correct).score;
-}
-
-// モック参加者用のランダム3連単（重複なし）
-function randomBet(): BetOrder {
-    const pool = [0, 1, 2, 3, 4, 5, 6, 7];
-    for (let i = pool.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [pool[i], pool[j]] = [pool[j], pool[i]];
-    }
-    return pool.slice(0, 3);
-}
-
-// Tailwind の任意値クラス（text-[10px] など）は、claude.ai のプレビュー等
-// 「Tailwind 標準クラスのみ」の環境では生成されない。同じ見た目になるよう CSS を同梱する。
-const ARBITRARY_CLASS_FALLBACK_CSS = `
-.text-\\[9px\\]{font-size:9px;line-height:1.3}
-.text-\\[10px\\]{font-size:10px;line-height:1.35}
-.text-\\[11px\\]{font-size:11px;line-height:1.4}
-.max-w-\\[100px\\]{max-width:100px}
-.max-w-\\[120px\\]{max-width:120px}
-.max-w-\\[140px\\]{max-width:140px}
-.max-w-\\[150px\\]{max-width:150px}
-.max-w-\\[170px\\]{max-width:170px}
-.max-w-\\[360px\\]{max-width:360px}
-.rounded-\\[30px\\]{border-radius:30px}
-.rounded-\\[40px\\]{border-radius:40px}
-.z-\\[60\\]{z-index:60}
-`;
-
-const CLOSED_DIALOG: ConfirmDialogState = { isOpen: false, title: '', message: '', onConfirm: null };
-
 export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath = '/trifecta' }: DerbyAppProps) {
-    // 役割ごとの責務
-    // ・幹事（host）と開発用（multiview）が「正の情報源」。進行・採点・問題データを配信する
-    // ・3D描画はスクリーン（screen）と開発用のみ。参加者スマホでは3Dを一切動かさない
-    const isAuthority = role === 'host' || role === 'multiview';
+    const isHostRole = role === 'host' || role === 'multiview';
     const renders3D = role === 'screen' || role === 'multiview';
-    // 3Dを描画する画面（会場スクリーン）のみが物理シミュレーションを動かす（幹事・参加者は描画もシミュレーションもせずゴール通知を待つ）
-    const runsSimulation = renders3D;
+    const pollMs = role === 'play' ? 4000 : 2500;
 
     const [isMounted, setIsMounted] = useState(false);
-
-    // 3連単ゲーム内画面ルート
     const [derbyRoute, setDerbyRoute] = useState<DerbyRoute>(role);
     const [adminSubTab, setAdminSubTab] = useState<AdminSubTab>('live');
 
-    // 3連単レースデータ（全3R）
-    const [races, setRaces] = useState<DerbyRace[]>(DEFAULT_DERBY_RACES);
+    // ---- DB から届く状態 ----
+    const [loaded, setLoaded] = useState(false);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [races, setRaces] = useState<DerbyRace[]>([]);
     const [currentRaceIndex, setCurrentRaceIndex] = useState(0);
     const [gameStatus, setGameStatus] = useState<GameStatus>('idle');
-    const [correctOrder, setCorrectOrder] = useState<BetOrder>([6, 4, 0]);
-    const [isMuted, setIsMuted] = useState(role === 'host' || role === 'play'); // 音は会場スクリーンから出す
+    const [correctOrder, setCorrectOrder] = useState<BetOrder | null>(null);
+    const [raceStartedAt, setRaceStartedAt] = useState<number | null>(null);
+    const [raceDurationMs, setRaceDurationMs] = useState<number | null>(null);
+    const [participants, setParticipants] = useState<Participant[]>([]);
 
-    // カメラは右斜め前の俯瞰で固定（残り距離・実況は React State にせず ref で DOM 直接更新する）
-    // レース中のリアルタイム順位（並び替え演出用）
-    const [realtimeRanks, setRealtimeRanks] = useState<number[]>([0, 1, 2, 3, 4, 5, 6, 7]);
-
-    // 参加者状態
-    const [participantId, setParticipantId] = useState('guest_temp');
-    const [participantName, setParticipantName] = useState(role === 'multiview' ? 'ゲスト（あなた）' : '');
+    // ---- 参加者（この端末） ----
+    const [participantId, setParticipantId] = useState('');
+    const [participantName, setParticipantName] = useState('');
     const [nameInput, setNameInput] = useState('');
-    const [participantScore, setParticipantScore] = useState(0);
     const [selectedChoices, setSelectedChoices] = useState<number[]>([]);
-    const [issuedBetSlip, setIssuedBetSlip] = useState<BetOrder | null>(null);
+    const [betSending, setBetSending] = useState(false);
+    const [betError, setBetError] = useState<string | null>(null);
 
-    // 誤操作防止確認モーダル / トースト（alert() の代替）
+    // ---- 幹事 ----
+    const [hostPassword, setHostPassword] = useState('');
+    const [hostAuthed, setHostAuthed] = useState(false);
+    const [loginInput, setLoginInput] = useState('');
+    const [loginError, setLoginError] = useState<string | null>(null);
+    const [hostBusy, setHostBusy] = useState(false);
+    const [draftRaces, setDraftRaces] = useState<DerbyRace[] | null>(null); // 問題登録の下書き（保存するまで本番に影響しない）
+    const [editRaceIndex, setEditRaceIndex] = useState(0);
+
+    // ---- 表示 ----
     const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(CLOSED_DIALOG);
     const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-    // 参加者リスト（モック＋リアルタイム同期）
-    const [participants, setParticipants] = useState<Participant[]>(role !== 'multiview' ? [] : [
-        { id: "g1", name: "新郎友人・たけし", score: 0, betSlip: [6, 4, 0], isMock: true },
-        { id: "g2", name: "新婦同僚・えりか", score: 0, betSlip: [0, 2, 4], isMock: true },
-        { id: "g3", name: "大学サークル・けんた", score: 0, betSlip: [1, 3, 5], isMock: true },
-        { id: "g4", name: "受付・まい", score: 0, betSlip: [4, 6, 2], isMock: true },
-        { id: "g5", name: "新婦親友・さくら", score: 0, betSlip: [6, 0, 4], isMock: true }
-    ]);
-
-    // 各馬への投票数集計（単勝オッズに代わり投票数を表示）
-    const horseVoteCounts = useMemo(() => {
-        const counts = new Array(8).fill(0);
-        participants.forEach(p => {
-            if (p.betSlip && Array.isArray(p.betSlip)) {
-                p.betSlip.forEach((hIdx: number) => {
-                    if (typeof hIdx === 'number' && hIdx >= 0 && hIdx < 8) {
-                        counts[hIdx]++;
-                    }
-                });
-            }
-        });
-        return counts;
-    }, [participants]);
-
-    // Supabase設定
-    const [supabaseUrl, setSupabaseUrl] = useState(ENV_SUPABASE_URL);
-    const [supabaseKey, setSupabaseKey] = useState(ENV_SUPABASE_KEY);
+    const [isMuted, setIsMuted] = useState(role === 'host' || role === 'play'); // 音は会場スクリーンから出す
+    const [realtimeRanks, setRealtimeRanks] = useState<number[]>([0, 1, 2, 3, 4, 5, 6, 7]);
     const [audioUnlocked, setAudioUnlocked] = useState(false);
     const [webglError, setWebglError] = useState(false);
     const [origin, setOrigin] = useState('');
     const [isCloudConnected, setIsCloudConnected] = useState(false);
+    const [localFinishedKey, setLocalFinishedKey] = useState<string | null>(null); // スクリーンが自分の映像でゴールしたレース
+    const [nowTick, setNowTick] = useState(0); // 幹事画面のカウントダウン用
 
-    // レース終了ガード（バグ④対策：完了処理は1レース1回だけ、確定レースの再走を完全防止）
-    const hasFinishedRef = useRef(false);
-    const finishedRacesRef = useRef<Set<number>>(new Set());
-    // 発走/リセットのたびに +1。アニメーションループはこの値が変わった時だけレース状態を初期化する
-    const raceRunRef = useRef(0);
-    // 幹事：現在の発走ID / 受信側：最後に受け付けた発走ID
-    const runIdRef = useRef('');
-    const lastRunIdRef = useRef('');
-
-    // Three.js 系 Ref（コンポーネント生存中は1つの renderer / WebGL コンテキストを使い回す）
+    // ---- Three.js ----
     const containerElRef = useRef<HTMLDivElement | null>(null);
     const resizeObserverRef = useRef<ResizeObserver | null>(null);
-    const sceneRef = useRef<THREE.Scene | null>(null);
     const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
     const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-    const horseMeshesRef = useRef<HorseObject[]>([]);
     const soundRef = useRef<SoundSynthesizer | null>(null);
-    const channelRef = useRef<RealtimeChannelLike | null>(null);
-    const supabaseClientRef = useRef<SupabaseClientLike | null>(null);
-
-    // 残り距離・実況テロップの直接DOM更新用（バグ②対策）
     const remainElRef = useRef<HTMLSpanElement | null>(null);
     const commentaryElRef = useRef<HTMLSpanElement | null>(null);
     const lastRemainRef = useRef(1000);
     const lastCommentaryRef = useRef(INITIAL_COMMENTARY);
 
-    // アニメーションループ / コールバック内から最新値を読むための Ref（バグ③対策）
-    const statusRef = useRef<GameStatus>(gameStatus);
-    const correctOrderRef = useRef<BetOrder>(correctOrder);
-    const raceIndexRef = useRef(currentRaceIndex);
-    const issuedBetSlipRef = useRef<BetOrder | null>(issuedBetSlip);
-    const participantIdRef = useRef(participantId);
-    const participantNameRef = useRef(participantName);
-    const isCloudConnectedRef = useRef(isCloudConnected);
-    const racesRef = useRef<DerbyRace[]>(races);
-    const participantsRef = useRef<Participant[]>(participants);
+    // ---- 最新値を非同期処理・描画ループから読むための Ref ----
+    const raceKey = `${currentRaceIndex}:${raceStartedAt ?? '-'}`;
+    const statusRef = useRef<GameStatus>('idle');
+    const orderRef = useRef<BetOrder | null>(null);
+    const startedAtRef = useRef<number | null>(null);
+    const durationRef = useRef<number | null>(null);
+    const raceIndexRef = useRef(0);
+    const raceKeyRef = useRef(raceKey);
+    const hostPasswordRef = useRef('');
+    const versionRef = useRef(0);
+    const clockOffsetRef = useRef(0);      // サーバー時刻 − 端末時刻
+    const bestRttRef = useRef(Infinity);
+    const localFinishedRef = useRef<string | null>(null);
+    const onLocalFinishRef = useRef<(key: string) => void>(() => { });
 
     statusRef.current = gameStatus;
-    correctOrderRef.current = correctOrder;
+    orderRef.current = correctOrder;
+    startedAtRef.current = raceStartedAt;
+    durationRef.current = raceDurationMs;
     raceIndexRef.current = currentRaceIndex;
-    issuedBetSlipRef.current = issuedBetSlip;
-    participantIdRef.current = participantId;
-    participantNameRef.current = participantName;
-    isCloudConnectedRef.current = isCloudConnected;
-    racesRef.current = races;
-    participantsRef.current = participants;
+    raceKeyRef.current = raceKey;
+    hostPasswordRef.current = hostAuthed ? hostPassword : '';
+
+    const serverNow = useCallback(() => Date.now() + clockOffsetRef.current, []);
 
     // --------------------------------------------------------------
-    // Supabase DB から最新データを取得（参照）
+    // スナップショットの反映（古い応答で新しい状態を巻き戻さない）
     // --------------------------------------------------------------
-    const loadInitialDataFromDB = useCallback(async () => {
-        try {
-            const res = await fetch('/api/trifecta', { cache: 'no-store' });
-            if (!res.ok) return;
-            const json = await res.json();
-            if (json.success && json.data) {
-                const { game, races: fetchedRaces, participants: fetchedParticipants } = json.data;
-                if (fetchedRaces && fetchedRaces.length > 0) {
-                    setRaces(fetchedRaces);
-                }
-                if (fetchedParticipants) {
-                    setParticipants(fetchedParticipants);
-                    // 自分の投票状態・スコアを復元
-                    const myId = participantIdRef.current;
-                    const mine = fetchedParticipants.find((p: Participant) => p.id === myId);
-                    if (mine) {
-                        if (mine.betSlip) {
-                            setIssuedBetSlip(mine.betSlip);
-                        }
-                        if (typeof mine.score === 'number') {
-                            setParticipantScore(mine.score);
-                        }
-                    }
-                }
-                if (game) {
-                    setCurrentRaceIndex(game.currentRaceIndex);
-                    raceIndexRef.current = game.currentRaceIndex;
-
-                    const isThisRaceFinished = finishedRacesRef.current.has(game.currentRaceIndex) ||
-                        (game.currentRaceIndex === raceIndexRef.current && (hasFinishedRef.current || statusRef.current === 'result'));
-
-                    // 既に確定したレースに対して、DB の古い racing 状態で勝手に再スタートさせない！
-                    if (game.status === 'racing' && isThisRaceFinished) {
-                        // 確定済みなので racing への巻き戻しを完全に無視
-                    } else if (game.status === 'racing' && statusRef.current !== 'racing') {
-                        // 管理者が新たに発走させた場合のみスタート
-                        lastRunIdRef.current = `db:${game.currentRaceIndex}`;
-                        resetHorsePositionsRef.current();
-                        setGameStatus('racing');
-                        statusRef.current = 'racing';
-                    } else if (game.status !== 'racing') {
-                        // レース進行中（statusRef === 'racing'）に古い idle / result レスポンスで上書きされるのを防ぐ
-                        if (statusRef.current !== 'racing') {
-                            setGameStatus(game.status);
-                            statusRef.current = game.status;
-                        }
-                    }
-                    if (game.correctOrder) {
-                        setCorrectOrder(game.correctOrder);
-                        correctOrderRef.current = game.correctOrder;
-                    }
-                }
-            }
-        } catch (e) {
-            console.warn("DB load warning:", e);
+    const applySnapshot = useCallback((snap: Snapshot) => {
+        if (snap.version < versionRef.current) return;
+        versionRef.current = snap.version;
+        const g = snap.game;
+        if (g.currentRaceIndex !== raceIndexRef.current) {
+            setSelectedChoices([]);
+            setBetError(null);
         }
+        raceIndexRef.current = g.currentRaceIndex;
+        statusRef.current = g.status;
+        setRaces(snap.races);
+        setCurrentRaceIndex(g.currentRaceIndex);
+        setGameStatus(g.status);
+        setCorrectOrder(g.correctOrder);
+        setRaceStartedAt(g.raceStartedAt);
+        setRaceDurationMs(g.raceDurationMs);
+        setParticipants(snap.participants);
+        setLoaded(true);
+        setLoadError(null);
     }, []);
 
+    const authHeaders = useCallback((): Record<string, string> => (
+        hostPasswordRef.current ? { 'x-host-password': hostPasswordRef.current } : {}
+    ), []);
+
+    const updateClock = (serverNowMs: number, t0: number, t1: number) => {
+        const rtt = t1 - t0;
+        // 往復時間が短い応答ほど正確。少しずつ基準を緩めて、回線状況の変化にも追従する
+        bestRttRef.current = Math.min(bestRttRef.current * 1.05, Number.MAX_VALUE);
+        if (rtt <= bestRttRef.current) {
+            bestRttRef.current = rtt;
+            clockOffsetRef.current = serverNowMs - (t0 + t1) / 2;
+        }
+    };
+
+    // ---- 取得（同時に1本だけ。実行中に要求が来たら終わってからもう1回） ----
+    const fetchingRef = useRef(false);
+    const refetchRef = useRef(false);
+    const fetchSnapshot = useCallback(async () => {
+        if (fetchingRef.current) { refetchRef.current = true; return; }
+        fetchingRef.current = true;
+        try {
+            do {
+                refetchRef.current = false;
+                const t0 = Date.now();
+                const res = await fetch('/api/trifecta', { cache: 'no-store', headers: authHeaders() });
+                const t1 = Date.now();
+                const json = await res.json().catch(() => null);
+                if (!res.ok || !json?.success) {
+                    setLoadError(json?.error || `サーバーに接続できません（${res.status}）`);
+                } else {
+                    updateClock(json.data.serverNow, t0, t1);
+                    applySnapshot(json.data as Snapshot);
+                }
+            } while (refetchRef.current);
+        } catch {
+            setLoadError('サーバーに接続できません。通信状況を確認してください（自動で再接続します）');
+        } finally {
+            fetchingRef.current = false;
+        }
+    }, [applySnapshot, authHeaders]);
+
+    const fetchTimerRef = useRef<number | null>(null);
+    const scheduleFetch = useCallback((delay = 120) => {
+        if (fetchTimerRef.current) window.clearTimeout(fetchTimerRef.current);
+        fetchTimerRef.current = window.setTimeout(() => { void fetchSnapshot(); }, delay);
+    }, [fetchSnapshot]);
+
+    // ---- リアルタイム配信（更新の合図だけ） ----
+    const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
+    const nudgeOthers = useCallback(() => {
+        const ch = channelRef.current;
+        if (ch) void ch.send({ type: 'broadcast', event: 'refresh', payload: { at: Date.now() } });
+    }, []);
+
+    // ---- 送信（成功したら最新状態を反映して、他の画面に合図） ----
+    const postAction = useCallback(async (type: string, payload: Record<string, unknown> = {}): Promise<ApiResult> => {
+        try {
+            const t0 = Date.now();
+            const res = await fetch('/api/trifecta', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ type, ...payload })
+            });
+            const t1 = Date.now();
+            const json = await res.json().catch(() => null);
+            if (!res.ok || !json?.success) {
+                if (res.status === 401 && isHostRole && hostPasswordRef.current) {
+                    setHostAuthed(false);
+                    setLoginError('幹事パスワードが無効になりました。もう一度ログインしてください');
+                    try { sessionStorage.removeItem(HOST_PW_KEY); } catch { /* noop */ }
+                }
+                return { ok: false, status: res.status, error: json?.error || `通信エラー（${res.status}）` };
+            }
+            updateClock(json.data.serverNow, t0, t1);
+            applySnapshot(json.data as Snapshot);
+            nudgeOthers();
+            return { ok: true, status: res.status, data: json.data, duplicate: !!json.duplicate };
+        } catch {
+            return { ok: false, status: 0, error: '通信できませんでした。電波の良い場所でもう一度お試しください' };
+        }
+    }, [applySnapshot, authHeaders, nudgeOthers, isHostRole]);
+
+    // 幹事操作の共通ラッパー（二重押し防止・失敗表示）
+    const runHost = useCallback(async (type: string, payload: Record<string, unknown> = {}, okMessage?: string) => {
+        setHostBusy(true);
+        const r = await postAction(type, payload);
+        setHostBusy(false);
+        if (!r.ok) setToastMessage(r.error ?? '操作に失敗しました');
+        else if (okMessage) setToastMessage(okMessage);
+        return r;
+    }, [postAction]);
+
     // --------------------------------------------------------------
-    // 初期化（localStorage 読み込み ＋ Supabase DB からデータ取得）
+    // 起動
     // --------------------------------------------------------------
     useEffect(() => {
         setIsMounted(true);
         setOrigin(window.location.origin);
         soundRef.current = new SoundSynthesizer();
         soundRef.current.muted = role === 'host' || role === 'play';
-
         try {
-            const savedPid = localStorage.getItem('derby_participant_id') || `p_${Math.random().toString(36).slice(2, 9)}`;
+            const savedPid = localStorage.getItem('derby_participant_id') || `p_${Math.random().toString(36).slice(2, 11)}`;
             localStorage.setItem('derby_participant_id', savedPid);
             setParticipantId(savedPid);
-
-            if (role === 'play') {
-                const savedName = localStorage.getItem('derby_participant_name') || '';
-                if (savedName) setParticipantName(savedName);
+            const savedName = localStorage.getItem('derby_participant_name') || '';
+            if (role === 'play' && savedName) setParticipantName(savedName);
+            if (role === 'multiview') setParticipantName(savedName || 'ゲスト（あなた）');
+            if (isHostRole) {
+                const pw = sessionStorage.getItem(HOST_PW_KEY) || '';
+                if (pw) { setHostPassword(pw); setHostAuthed(true); hostPasswordRef.current = pw; }
             }
         } catch (e) {
             console.warn("Storage load warning:", e);
         }
+        void fetchSnapshot();
+    }, [role, isHostRole, fetchSnapshot]);
 
-        // DB から最新状態を参照・反映
-        void loadInitialDataFromDB();
+    // 定期再取得（レース中も止めない）＋ 画面復帰時に即再取得
+    useEffect(() => {
+        const t = window.setInterval(() => { void fetchSnapshot(); }, pollMs);
+        const onVisible = () => { if (document.visibilityState === 'visible') void fetchSnapshot(); };
+        document.addEventListener('visibilitychange', onVisible);
+        window.addEventListener('online', onVisible);
+        window.addEventListener('focus', onVisible);
+        return () => {
+            window.clearInterval(t);
+            document.removeEventListener('visibilitychange', onVisible);
+            window.removeEventListener('online', onVisible);
+            window.removeEventListener('focus', onVisible);
+        };
+    }, [fetchSnapshot, pollMs]);
 
-        // 定期的に DB と整合性を同期（レース実行中以外）
-        const timer = window.setInterval(() => {
-            if (statusRef.current !== 'racing') {
-                void loadInitialDataFromDB();
-            }
-        }, 5000);
+    // リアルタイム配信の購読（再接続のたびに最新状態を取り直す）
+    useEffect(() => {
+        let cancelled = false;
+        const ch = supabase.channel('derby-realtime-room')
+            .on('broadcast', { event: 'refresh' }, () => scheduleFetch())
+            .subscribe((st) => {
+                if (cancelled) return;
+                const ok = st === 'SUBSCRIBED';
+                setIsCloudConnected(ok);
+                if (ok) scheduleFetch(0);
+            });
+        channelRef.current = ch;
+        return () => {
+            cancelled = true;
+            void supabase.removeChannel(ch);
+            if (channelRef.current === ch) channelRef.current = null;
+        };
+    }, [scheduleFetch]);
 
-        return () => window.clearInterval(timer);
-    }, [role, isAuthority, loadInitialDataFromDB]);
+    // 幹事ログイン状態が変わったら、幹事用の情報（正解着順など）を取り直す
+    useEffect(() => {
+        if (isHostRole && hostAuthed) {
+            versionRef.current = 0;
+            void fetchSnapshot();
+        }
+    }, [isHostRole, hostAuthed, fetchSnapshot]);
+
+    // 参加者：名前が決まったら参加登録（再訪時も念のため登録し直す）
+    const joinedRef = useRef('');
+    useEffect(() => {
+        if (role === 'screen' || role === 'host') return;
+        if (!loaded || !participantId || !participantName) return;
+        const key = `${participantId}:${participantName}`;
+        if (joinedRef.current === key) return;
+        joinedRef.current = key;
+        void postAction('join', { participantId, name: participantName }).then(r => {
+            if (!r.ok) { joinedRef.current = ''; setBetError(r.error ?? '参加登録に失敗しました'); }
+        });
+    }, [role, loaded, participantId, participantName, postAction]);
 
     // トースト自動消去
     useEffect(() => {
         if (!toastMessage) return;
-        const t = window.setTimeout(() => setToastMessage(null), 2400);
+        const t = window.setTimeout(() => setToastMessage(null), 2800);
         return () => window.clearTimeout(t);
     }, [toastMessage]);
 
-    const currentRace = races[currentRaceIndex] || races[0];
+    // --------------------------------------------------------------
+    // レース進行（ゴール確定の多重保険）
+    // --------------------------------------------------------------
+    // 会場スクリーン：自分の映像でゴールしたら、すぐ結果表示に切り替えて確定を依頼
+    onLocalFinishRef.current = (key: string) => {
+        if (localFinishedRef.current === key) return;
+        localFinishedRef.current = key;
+        setLocalFinishedKey(key);
+        void postAction('finalize_race');
+    };
+
+    // 幹事画面：ゴール時刻 +0.3秒 に確定を依頼（スクリーンが閉じていても進む）
+    useEffect(() => {
+        if (!isHostRole || gameStatus !== 'racing' || raceStartedAt === null || raceDurationMs === null) return;
+        const wait = Math.max(0, raceStartedAt + raceDurationMs + 300 - serverNow());
+        const t = window.setTimeout(() => { void postAction('finalize_race'); }, wait);
+        const t2 = window.setTimeout(() => { void fetchSnapshot(); }, wait + 2500); // 念のため
+        return () => { window.clearTimeout(t); window.clearTimeout(t2); };
+    }, [isHostRole, gameStatus, raceStartedAt, raceDurationMs, serverNow, postAction, fetchSnapshot]);
+
+    // 幹事画面のカウントダウン表示
+    useEffect(() => {
+        if (gameStatus !== 'racing') return;
+        const t = window.setInterval(() => setNowTick(x => x + 1), 500);
+        return () => window.clearInterval(t);
+    }, [gameStatus]);
+
+    // スクリーン上の表示状態：DB がまだ racing でも、自分の映像がゴールしていれば結果を出す
+    const displayStatus: GameStatus = (gameStatus === 'racing' && renders3D && localFinishedKey === raceKey) ? 'result' : gameStatus;
+
+    // 効果音（会場スクリーン）
+    const prevDisplayStatusRef = useRef<GameStatus | null>(null);
+    useEffect(() => {
+        const prev = prevDisplayStatusRef.current;
+        prevDisplayStatusRef.current = displayStatus;
+        if (prev === null || prev === displayStatus) return;
+        const snd = soundRef.current;
+        if (!snd) return;
+        if (displayStatus === 'racing' && raceStartedAt !== null && serverNow() - raceStartedAt < 5000) snd.playFanfare();
+        else if (displayStatus === 'result' && prev === 'racing') { snd.playFanfare(); snd.playCheers(); }
+        else if (displayStatus === 'grand_finale') { snd.playFanfare(); snd.playCheers(); }
+    }, [displayStatus, raceStartedAt, serverNow]);
 
     // --------------------------------------------------------------
-    // 実況・残り距離の DOM 直接書き換え（値が変わった時だけ）
+    // 実況・残り距離の DOM 直接書き換え（毎フレーム setState しない）
     // --------------------------------------------------------------
     const writeRemain = useCallback((value: number) => {
         if (lastRemainRef.current === value) return;
         lastRemainRef.current = value;
         if (remainElRef.current) remainElRef.current.textContent = String(value);
     }, []);
-
     const writeCommentary = useCallback((text: string) => {
         if (lastCommentaryRef.current === text) return;
         lastCommentaryRef.current = text;
         if (commentaryElRef.current) commentaryElRef.current.textContent = text;
     }, []);
-
-    // スクリーン再マウント時に最新値を即反映する callback ref
     const remainCallbackRef = useCallback((el: HTMLSpanElement | null) => {
         remainElRef.current = el;
         if (el) el.textContent = String(lastRemainRef.current);
@@ -975,9 +885,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }, []);
 
     // --------------------------------------------------------------
-    // Three.js canvas のアタッチ（バグ①対策）
-    // renderer は1回だけ生成し、スクリーン枠の div がマウントされるたびに
-    // その div へ canvas を付け替える。タブ切替で WebGL コンテキストを失わない。
+    // Three.js canvas のアタッチ（renderer は1つを使い回し、表示枠が変わったら付け替える）
     // --------------------------------------------------------------
     const resizeRenderer = useCallback(() => {
         const container = containerElRef.current;
@@ -996,9 +904,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         const container = containerElRef.current;
         const renderer = rendererRef.current;
         if (!container || !renderer) return;
-        if (renderer.domElement.parentElement !== container) {
-            container.appendChild(renderer.domElement);
-        }
+        if (renderer.domElement.parentElement !== container) container.appendChild(renderer.domElement);
         renderer.domElement.style.display = 'block';
         renderer.domElement.style.width = '100%';
         renderer.domElement.style.height = '100%';
@@ -1019,306 +925,12 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }, [attachRendererToContainer, resizeRenderer]);
 
     // --------------------------------------------------------------
-    // 馬の位置リセット
-    // --------------------------------------------------------------
-    const resetHorsePositions = useCallback(() => {
-        hasFinishedRef.current = false;
-        raceRunRef.current += 1;
-        horseMeshesRef.current.forEach((h, i) => {
-            // 奇数番と偶数番で前後をずらし、バッジが重ならず綺麗に見えるようにする
-            h.progressZ = RACE_START_Z - ((i % 2) * 2.0) - (i * 0.4);
-            h.currentSpeed = 0; // 静止状態から滑らかに加速してスタート
-            h.currentLaneX = h.baseLaneX;
-            h.targetLaneX = h.baseLaneX;
-            h.finished = false;
-            h.mesh.position.set(h.baseLaneX, 0, h.progressZ);
-        });
-        writeRemain(1000);
-        writeCommentary(INITIAL_COMMENTARY);
-    }, [writeRemain, writeCommentary]);
-
-    // --------------------------------------------------------------
-    // Supabase Realtime
-    // --------------------------------------------------------------
-    const broadcastGameState = useCallback((newStatus: GameStatus, rIdx: number, cOrder: BetOrder) => {
-        if (channelRef.current && isCloudConnectedRef.current) {
-            const payload: GameStatePayload = {
-                status: newStatus,
-                currentRaceIndex: rIdx,
-                correctOrder: cOrder,
-                races: racesRef.current,
-                leaderboard: participantsRef.current,
-                runId: runIdRef.current
-            };
-            void channelRef.current.send({ type: 'broadcast', event: 'game-state-change', payload });
-        }
-    }, []);
-
-    const sendEvent = useCallback((event: string, payload: unknown) => {
-        if (channelRef.current && isCloudConnectedRef.current) {
-            void channelRef.current.send({ type: 'broadcast', event, payload });
-        }
-    }, []);
-
-    const broadcastParticipantBet = useCallback((bet: BetOrder) => {
-        if (channelRef.current && isCloudConnectedRef.current) {
-            const payload: BetPayload = {
-                participantId: participantIdRef.current,
-                name: participantNameRef.current,
-                betOrder: bet,
-                raceIndex: raceIndexRef.current
-            };
-            void channelRef.current.send({ type: 'broadcast', event: 'participant-bet', payload });
-        }
-    }, []);
-
-    // --------------------------------------------------------------
-    // レース確定処理（バグ④対策：hasFinishedRef で1回だけ。最新値は全て ref から読む）
-    // --------------------------------------------------------------
-    const finalizeRace = useCallback((source: 'local' | 'remote') => {
-        if (hasFinishedRef.current) return;
-        hasFinishedRef.current = true;
-        finishedRacesRef.current.add(raceIndexRef.current);
-
-        const order = correctOrderRef.current;
-        const raceIdx = raceIndexRef.current;
-        const myBet = issuedBetSlipRef.current;
-
-        setGameStatus('result');
-        statusRef.current = 'result';
-        soundRef.current?.playFanfare();
-        soundRef.current?.playCheers();
-        const gained = myBet ? calculateBetScore(myBet, order) : 0;
-
-        // 会場スクリーンが自分の映像でゴールしたら幹事へ知らせる。
-        // 幹事のタブが裏に回ってアニメーションが止まっていても、これで確定できる。
-        if (!isAuthority && renders3D && source === 'local') {
-            sendEvent('race-finished', { raceIndex: raceIdx });
-        }
-
-        // 自分の投票があれば、端末側でも即座に獲得スコアを加算反映
-        if (gained > 0) {
-            setParticipantScore(prev => prev + gained);
-            setParticipants(prev => prev.map(p => (
-                p.id === participantIdRef.current ? { ...p, score: p.score + gained } : p
-            )));
-        }
-
-        // 採点は幹事側（正の情報源）が行い、得点表を全画面に配信する
-        if (isAuthority) {
-            if (source === 'local') {
-                broadcastGameState('result', raceIdx, order);
-                // DB 側に結果を保存し、参加者全員の的中得点を合算更新
-                void fetch('/api/trifecta', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ type: 'finalize_race', raceIndex: raceIdx, correctOrder: order })
-                }).then(() => {
-                    sendEvent('refresh-data', {});
-                }).catch(err => console.error("Finalize DB error:", err));
-            }
-            setParticipants(prev => prev.map(p => ({
-                ...p,
-                score: p.score + calculateBetScore(p.betSlip, order)
-            })));
-        }
-    }, [broadcastGameState, isAuthority, renders3D, sendEvent]);
-
-    // ループからは常に最新の finalizeRace を ref 経由で呼ぶ
-    const finalizeRaceRef = useRef(finalizeRace);
-    finalizeRaceRef.current = finalizeRace;
-    const resetHorsePositionsRef = useRef(resetHorsePositions);
-    resetHorsePositionsRef.current = resetHorsePositions;
-
-    // 他端末から届いた状態を反映
-    const applyRemoteGameState = useCallback((payload: GameStatePayload) => {
-        // 幹事側は自分が正なので、他から届いた状態では上書きしない
-        if (isAuthority) return;
-        if (payload.races && payload.races.length > 0) setRaces(payload.races);
-        if (payload.leaderboard) {
-            setParticipants(payload.leaderboard);
-            // リロードした参加者の馬券・得点を復元
-            const mine = payload.leaderboard.find(p => p.id === participantIdRef.current);
-            if (mine) {
-                if (mine.betSlip && payload.currentRaceIndex === raceIndexRef.current && !issuedBetSlipRef.current) {
-                    setIssuedBetSlip(mine.betSlip);
-                }
-                if (typeof mine.score === 'number') {
-                    setParticipantScore(mine.score);
-                }
-            }
-        }
-        const prevStatus = statusRef.current;
-        const prevRace = raceIndexRef.current;
-        correctOrderRef.current = payload.correctOrder;
-        setCorrectOrder(payload.correctOrder);
-
-        if (payload.currentRaceIndex !== prevRace) {
-            setCurrentRaceIndex(payload.currentRaceIndex);
-            raceIndexRef.current = payload.currentRaceIndex;
-            setIssuedBetSlip(null);
-            setSelectedChoices([]);
-            setParticipants(prev => prev.map(p => ({ ...p, betSlip: null })));
-        }
-
-        if (payload.status === 'racing' && payload.runId) {
-            const rid = payload.runId;
-            if (rid === lastRunIdRef.current) {
-                // 同じ発走の重複受信（定期再配信など）：何もしない＝絶対に巻き戻さない
-                return;
-            }
-            const dbStartedSameRace = lastRunIdRef.current === `db:${payload.currentRaceIndex}`;
-            lastRunIdRef.current = rid;
-            if (dbStartedSameRace || (prevStatus === 'racing' && payload.currentRaceIndex === prevRace)) {
-                // DBポーリング経由で既に同じレースを走らせている：IDだけ引き継いで継続
-                return;
-            }
-            // 新しい発走：スタート位置から1回だけ走らせる
-            finishedRacesRef.current.delete(payload.currentRaceIndex);
-            hasFinishedRef.current = false;
-            resetHorsePositionsRef.current();
-            soundRef.current?.playFanfare();
-            statusRef.current = 'racing';
-            setGameStatus('racing');
-        } else if (payload.status === 'racing') {
-            const isThisRaceFinished = finishedRacesRef.current.has(payload.currentRaceIndex) ||
-                (payload.currentRaceIndex === raceIndexRef.current && (hasFinishedRef.current || statusRef.current === 'result'));
-            if (isThisRaceFinished) {
-                // 既に確定済みのレースであれば racing は完全に無視して結果表示を維持！
-                return;
-            }
-            if (prevStatus !== 'racing') {
-                resetHorsePositionsRef.current();
-                soundRef.current?.playFanfare();
-            }
-            statusRef.current = 'racing';
-            setGameStatus('racing');
-        } else if (payload.status === 'result') {
-            if (renders3D && prevStatus === 'racing') {
-                // スクリーンは自分の3Dレース映像で先頭馬がゴール板を駆け抜けるのを優先
-                // レース途中で強制打ち切りせず、スクリーンのゴール判定に任せる
-                const leadRemain = horseMeshesRef.current.length > 0
-                    ? Math.min(...horseMeshesRef.current.map(m => m.progressZ - FINISH_Z))
-                    : 1000;
-                if (leadRemain <= 5) {
-                    finalizeRaceRef.current('remote');
-                }
-            } else {
-                finalizeRaceRef.current('remote');
-            }
-        } else if (payload.status === 'idle') {
-            if (lastRunIdRef.current.startsWith('db:')) lastRunIdRef.current = '';
-            if (prevStatus !== 'idle') {
-                resetHorsePositionsRef.current();
-                if (payload.currentRaceIndex === prevRace) {
-                    // 再投票
-                    setIssuedBetSlip(null);
-                    setSelectedChoices([]);
-                }
-            }
-            statusRef.current = 'idle';
-            setGameStatus('idle');
-        } else {
-            statusRef.current = payload.status;
-            setGameStatus(payload.status);
-        }
-    }, [isAuthority, renders3D]);
-
-    useEffect(() => {
-        let isCancelled = false;
-        const ch = supabase.channel('derby-realtime-room')
-            .on('broadcast', { event: 'game-state-change' }, ({ payload }) => {
-                if (!payload) return;
-                applyRemoteGameState(payload as GameStatePayload);
-            })
-            .on('broadcast', { event: 'request-snapshot' }, () => {
-                // 後から開いた画面・リロードした画面へ現在の状態を送る
-                if (isAuthority) broadcastGameState(statusRef.current, raceIndexRef.current, correctOrderRef.current);
-            })
-            .on('broadcast', { event: 'race-finished' }, ({ payload }) => {
-                const msg = payload as { raceIndex?: number } | null;
-                if (!isAuthority || statusRef.current !== 'racing') return;
-                if (msg?.raceIndex !== undefined && msg.raceIndex !== raceIndexRef.current) return;
-                finalizeRaceRef.current('local');
-            })
-            .on('broadcast', { event: 'participant-join' }, ({ payload }) => {
-                if (!payload) return;
-                const join = payload as JoinPayload;
-                setParticipants(prev => {
-                    const idx = prev.findIndex(p => p.id === join.participantId);
-                    if (idx >= 0) {
-                        if (prev[idx].name === join.name) return prev;
-                        const updated = [...prev];
-                        updated[idx] = { ...updated[idx], name: join.name };
-                        return updated;
-                    }
-                    return [...prev, { id: join.participantId, name: join.name, score: 0, betSlip: null }];
-                });
-            })
-            .on('broadcast', { event: 'participant-bet' }, ({ payload }) => {
-                if (!payload) return;
-                const bet = payload as BetPayload;
-                if (bet.raceIndex !== undefined && bet.raceIndex !== raceIndexRef.current) return;
-                setParticipants(prev => {
-                    const idx = prev.findIndex(p => p.id === bet.participantId);
-                    if (idx >= 0) {
-                        const updated = [...prev];
-                        updated[idx] = { ...updated[idx], betSlip: bet.betOrder, name: bet.name };
-                        return updated;
-                    }
-                    return [...prev, { id: bet.participantId, name: bet.name, score: 0, betSlip: bet.betOrder }];
-                });
-            })
-            .on('broadcast', { event: 'refresh-data' }, () => {
-                void loadInitialDataFromDB();
-            })
-            .subscribe((st) => {
-                if (isCancelled) return;
-                const ok = st === 'SUBSCRIBED';
-                isCloudConnectedRef.current = ok;
-                setIsCloudConnected(ok);
-                if (ok && !isAuthority) {
-                    void ch.send({ type: 'broadcast', event: 'request-snapshot', payload: {} });
-                }
-            });
-
-        channelRef.current = ch as unknown as RealtimeChannelLike;
-
-        return () => {
-            isCancelled = true;
-            void supabase.removeChannel(ch);
-            if (channelRef.current === (ch as unknown as RealtimeChannelLike)) {
-                channelRef.current = null;
-            }
-            setIsCloudConnected(false);
-        };
-    }, [applyRemoteGameState, isAuthority, broadcastGameState, loadInitialDataFromDB]);
-
-    // 幹事側：参加者・問題が変わったら全画面へ最新の得点表と問題を再配信（0.3秒まとめ）
-    useEffect(() => {
-        if (!isAuthority || !isCloudConnected) return;
-        const t = window.setTimeout(() => {
-            broadcastGameState(statusRef.current, raceIndexRef.current, correctOrderRef.current);
-        }, 300);
-        return () => window.clearTimeout(t);
-    }, [isAuthority, isCloudConnected, participants, races, broadcastGameState]);
-
-    // 参加者：名前が決まり接続できたら幹事へ参加通知
-    useEffect(() => {
-        if (role !== 'play' || !isCloudConnected || !participantName || participantId === 'guest_temp') return;
-        const join: JoinPayload = { participantId, name: participantName };
-        sendEvent('participant-join', join);
-    }, [role, isCloudConnected, participantName, participantId, sendEvent]);
-
-    // --------------------------------------------------------------
-    // Three.js シーン生成 ＋ アニメーションループ（マウント後に1回だけ）
-    // バグ①：isMounted が true になってから実行（以前は [] 依存で null 空振り）
-    // バグ②：ループ内で setState しない
-    // バグ③：依存は isMounted のみ。最新状態は全て ref から読むので多重起動しない
+    // Three.js シーン生成 ＋ 描画ループ（スクリーンのみ。マウント後に1回だけ）
+    // 馬の位置は「発走からの経過秒」でシミュレーションした結果をそのまま映す
+    // カメラは右斜め前からの固定俯瞰で平行移動のみ
     // --------------------------------------------------------------
     useEffect(() => {
-        // 参加者スマホでは3Dもレース計算も動かさない（電池・発熱・音の重複を避ける）
-        if (!isMounted || !runsSimulation) return;
+        if (!isMounted || !renders3D) return;
 
         const trackWidth = 64;
         const trackLength = 1600;
@@ -1326,114 +938,85 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x9bd2fc);
         scene.fog = new THREE.FogExp2(0x9bd2fc, 0.0016);
-        sceneRef.current = scene;
 
+        // 固定カメラ初期設定（もっと右斜め前からの俯瞰、引き・高さを確保）
         const camera = new THREE.PerspectiveCamera(50, 600 / 650, 0.5, 2000);
-        camera.position.set(10, 26, -32);
-        camera.lookAt(-8, 2, 4);
+        camera.position.set(26, 38, -48);
+        camera.lookAt(-4, 0, 8);
         cameraRef.current = camera;
 
-        // 描画は screen / multiview のみ。幹事画面はレース計算だけ行い、WebGL を使わない。
-        // WebGL が使えない環境（リモートデスクトップ、GPU無効など）でもアプリ全体が落ちないよう try/catch
         let renderer: THREE.WebGLRenderer | null = null;
-        if (renders3D) {
-            try {
-                renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
-                renderer.setSize(600, 650);
-                renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-                renderer.shadowMap.enabled = true;
-                renderer.shadowMap.type = THREE.PCFShadowMap; // PCFSoftShadowMap は新しい three で廃止
-                rendererRef.current = renderer;
-            } catch (err) {
-                console.warn("WebGL を初期化できませんでした:", err);
-                renderer = null;
-                setWebglError(true);
-            }
+        try {
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(600, 650);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFShadowMap;
+            rendererRef.current = renderer;
+        } catch (err) {
+            console.warn("WebGL を初期化できませんでした:", err);
+            renderer = null;
+            setWebglError(true);
         }
 
-        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x446644, 0.8);
-        scene.add(hemiLight);
-
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x446644, 0.8));
         const dirLight = new THREE.DirectionalLight(0xfffaed, 0.95);
         dirLight.position.set(40, 70, 40);
         dirLight.castShadow = true;
         scene.add(dirLight);
 
-        // コース芝生グラウンド（幅64mのワイドコース）
-        const groundMat = new THREE.MeshLambertMaterial({ map: generateTurfTexture() });
-        const ground = new THREE.Mesh(new THREE.PlaneGeometry(trackWidth, trackLength), groundMat);
+        // コース芝生（幅64m）
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(trackWidth, trackLength), new THREE.MeshLambertMaterial({ map: generateTurfTexture() }));
         ground.rotation.x = -Math.PI / 2;
         ground.position.set(0, 0, -trackLength / 2 + 100);
         ground.receiveShadow = true;
         scene.add(ground);
 
-        // 内ラチ・外ラチ（白い柵）
+        // 内ラチ・外ラチ
         scene.add(createTrackFence(-trackWidth / 2, trackLength));
         scene.add(createTrackFence(trackWidth / 2, trackLength));
 
-        // スタンド壁（コース真横）
-        const standWallMat = new THREE.MeshLambertMaterial({ map: generateStandWallTexture() });
-        const standWall = new THREE.Mesh(new THREE.BoxGeometry(10, 12, trackLength), standWallMat);
+        // スタンド壁
+        const standWall = new THREE.Mesh(new THREE.BoxGeometry(10, 12, trackLength), new THREE.MeshLambertMaterial({ map: generateStandWallTexture() }));
         standWall.position.set(-trackWidth / 2 - 6, 6, -trackLength / 2 + 100);
         scene.add(standWall);
 
-        // ゴールポール（Z = -400）
+        // ゴールポール
         const finishPole = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 16, 12), new THREE.MeshLambertMaterial({ color: 0xef4444 }));
         finishPole.position.set(-trackWidth / 2 - 1, 8, FINISH_Z);
         scene.add(finishPole);
 
-        // 残り距離標識（1000m / 800m / 600m / 400m / 200m / 100m）— 茶色の壁側
-        const wallCourseX = -trackWidth / 2 - 0.8; // 茶色の壁のコース側表面
+        // 残り距離標識（壁側・右斜め前の俯瞰から見えるように設置）
+        const wallCourseX = -trackWidth / 2 - 0.8;
         [1000, 800, 600, 400, 200, 100].forEach(dist => {
             const cv = document.createElement('canvas');
             cv.width = 256; cv.height = 128;
             const c2 = cv.getContext('2d');
             if (!c2) return;
-            // 白地パネル ＋ 赤枠線
             c2.fillStyle = '#ffffff';
             c2.fillRect(0, 0, 256, 128);
             c2.lineWidth = 10;
             c2.strokeStyle = '#dc2626';
             c2.strokeRect(5, 5, 246, 118);
-
-            // 残り距離 数字
             c2.fillStyle = '#dc2626';
             c2.font = '900 68px "Impact", "Arial Black", sans-serif';
             c2.textAlign = 'center';
             c2.textBaseline = 'middle';
             c2.fillText(String(dist), 128, 52);
-
-            // "残り" ＋ "m" サブテキスト
             c2.fillStyle = '#1e293b';
             c2.font = 'bold 24px sans-serif';
             c2.fillText(`残り ${dist}m`, 128, 102);
-
-            const tex = new THREE.CanvasTexture(cv);
-            const boardMat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
-            const board = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 2.6), boardMat);
-            // 茶色の壁面（X = wallCourseX）、高さ Y = 7 に固定
+            const board = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 2.6), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), side: THREE.DoubleSide }));
             board.position.set(wallCourseX, 7, FINISH_Z + dist);
-            // 右斜め前（Xプラス・Zマイナス上空）の俯瞰カメラから最も見やすい角度（約75度）に傾ける
             board.rotation.y = Math.PI * 0.45;
-
-            // 壁と看板を接続するステー（金具アーム）
-            const arm = new THREE.Mesh(
-                new THREE.BoxGeometry(1.2, 0.25, 0.25),
-                new THREE.MeshLambertMaterial({ color: 0x334155 })
-            );
+            const arm = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.25, 0.25), new THREE.MeshLambertMaterial({ color: 0x334155 }));
             arm.position.set(wallCourseX - 0.5, 7, FINISH_Z + dist);
-
-            // 内ラチ沿いの補助ポール（地上からの支柱）
-            const post = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.12, 0.12, 7, 8),
-                new THREE.MeshLambertMaterial({ color: 0xffffff })
-            );
+            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 7, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }));
             post.position.set(wallCourseX + 0.1, 3.5, FINISH_Z + dist);
-
             scene.add(board, arm, post);
         });
 
-        // ゴール板（Z = FINISH_Z = -400）も茶色の壁側に大型「GOAL」看板を設置
+        // GOAL 看板
         const goalCv = document.createElement('canvas');
         goalCv.width = 256; goalCv.height = 128;
         const gc = goalCv.getContext('2d');
@@ -1450,313 +1033,136 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             gc.fillText('GOAL', 128, 56);
             gc.fillStyle = '#ffffff';
             gc.font = 'bold 22px sans-serif';
-            gc.fillText('FINISH LINE', 128, 102);
-
-            const goalTex = new THREE.CanvasTexture(goalCv);
-            const goalBoard = new THREE.Mesh(new THREE.PlaneGeometry(6, 3), new THREE.MeshBasicMaterial({ map: goalTex, side: THREE.DoubleSide }));
-            goalBoard.position.set(wallCourseX, 8, FINISH_Z);
+            gc.fillText('FINISH LINE', 128, 104);
+            const goalBoard = new THREE.Mesh(new THREE.PlaneGeometry(8, 4), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(goalCv), side: THREE.DoubleSide }));
+            goalBoard.position.set(wallCourseX, 10, FINISH_Z);
             goalBoard.rotation.y = Math.PI * 0.45;
             scene.add(goalBoard);
         }
 
-        // 8頭配置（幅広の芝生に合わせて間隔をゆったり広げる）
-        const meshes: HorseObject[] = [];
-        const horseSpacing = 5.8; // 馬同士の間隔をゆったり広く拡大
-        const startX = -((HORSES_DATA.length - 1) * horseSpacing) / 2; // -20.3 〜 +20.3
-        HORSES_DATA.forEach((hData, i) => {
+        // 馬8頭
+        const meshes: HorseObject[] = HORSES_DATA.map(hData => {
             const hObj = buildLowPolyHorse(hData);
-            const laneX = startX + (i * horseSpacing);
-            hObj.baseLaneX = laneX;
-            hObj.currentLaneX = laneX;
-            hObj.targetLaneX = laneX;
-            // 奇数番と偶数番で前後をずらし、バッジが重ならず綺麗に見えるように配置
-            hObj.progressZ = RACE_START_Z - ((i % 2) * 2.0) - (i * 0.4);
-            hObj.mesh.position.set(laneX, 0, hObj.progressZ);
             scene.add(hObj.mesh);
-            meshes.push(hObj);
+            return hObj;
         });
-        horseMeshesRef.current = meshes;
 
-        // すでにスクリーン枠がマウント済みなら即アタッチ
         attachRendererToContainer();
 
-        // ---------------- アニメーションループ ----------------
-        // ・物理は実時間の可変ステップ（最大1/60秒刻み）で毎フレーム積分 → どのリフレッシュレートでもカクつかない
-        // ・脚の回転/上下動は馬ごとの位相を積算（速度変化で位相が飛ばない）
-        // ・最終直線は「着順どおりのゴール到達時刻」から逆算した滑らかな曲線（エルミート補間）で走らせ、
-        //   速度の連続性を保ったまま幹事指定の着順で必ずゴールさせる
-        // ・カメラは右斜め前の俯瞰で角度・距離を完全固定し、馬群に合わせてコース方向へ平行移動するだけ
-        const SPEED_SCALE = 34; // 基準速度 m/s（スピード感あふれる速さ）
-        const MAX_STEP = 1 / 60;
-        const FINAL_PHASE_TRIGGER = 320; // 先頭が残りこの距離に来たら最終直線プランへ移行
-        const STOP_Z = FINISH_Z - 380; // ゴール後に流して止まる限界位置（芝生の端より手前）
-        interface FinalPlan { t0: number; T: number; startZ: number; dist: number; m0: number; m1: number; }
-        // 0→1 を結ぶ3次エルミート曲線（m0/m1 は始点・終点の速度比。m0,m1∈[0,2.2] で単調増加＝後退しない）
-        const hermite = (u: number, m0: number, m1: number) => {
-            const u2 = u * u;
-            const u3 = u2 * u;
-            return (u3 - 2 * u2 + u) * m0 + (-2 * u3 + 3 * u2) + (u3 - u2) * m1;
-        };
-        const hermiteD = (u: number, m0: number, m1: number) =>
-            (3 * u * u - 4 * u + 1) * m0 + (-6 * u * u + 6 * u) + (3 * u * u - 2 * u) * m1;
-        const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-
+        // ---------------- 描画ループ ----------------
+        let sim: SimState = createSimState();
+        let simKey = '';
         let lastTime = performance.now();
-        let raceTime = 0;
-        let runSeen = -1;
-        let runActive = false;
-        let finalPhaseStarted = false;
-        let plans: (FinalPlan | null)[] = meshes.map(() => null);
-        const gait: number[] = meshes.map((_, i) => i * 0.7);
-        let seed = Math.random() * 1000;
-        let focusZ = RACE_START_Z;
-        let focusInitialized = false;
+        let elapsed = 0;
         const badgeWorldPos = new THREE.Vector3();
         let gallopTimer = 0;
-        let rankUpdateTimer = 0;
-        let finishCooldown = -1;
+        let rankTimer = 0;
         let frameId = 0;
+        let snapCamera = true;
+        let maxSimT = 0; // 同一レース中の巻き戻り防止ガード
+        let focusZ = RACE_START_Z;
+        let focusInitialized = false;
 
-        // 固定カメラ（右斜め前の俯瞰）。角度・距離は一切変えず Z 方向へ平行移動のみ
-        const CAM_X = 12;
-        const CAM_Y = 30;
-        const CAM_OFFSET_Z = -36;
-        const LOOK_X = -6;
-        const LOOK_OFFSET_Z = 6;
+        // 固定カメラ設定（右斜め前からの俯瞰・平行移動のみ）
+        const CAM_X = 26;
+        const CAM_Y = 38;
+        const CAM_OFFSET_Z = -48;
+        const LOOK_X = -4;
+        const LOOK_OFFSET_Z = 8;
         const placeCamera = (z: number) => {
             camera.position.set(CAM_X, CAM_Y, z + CAM_OFFSET_Z);
             camera.lookAt(LOOK_X, 0, z + LOOK_OFFSET_Z);
         };
         placeCamera(RACE_START_Z);
 
-        // 道中（最終直線プラン前）の目標速度：レースごとに異なる4種類のシナリオで激しく順位が入れ替わる
-        const preFinalTargetSpeed = (h: HorseObject, idx: number, remain: number, order: BetOrder, scenario: number) => {
-            const [w, s, t] = order;
-            const wave1 = Math.sin(raceTime * 2.3 + idx * 1.85 + seed);
-            const wave2 = Math.cos(raceTime * 1.45 + idx * 2.9 + seed * 0.5);
-            const jitter = wave1 * 0.16 + wave2 * 0.08;
-            if (remain > 650) {
-                // 序盤：全馬が激しく競り合い、順位が目まぐるしくシャッフル
-                if (scenario === 3 && idx === w) return 1.18 + jitter; // 逃げパターン
-                return clamp(1.05 + jitter, 0.88, 1.25);
-            }
-            // 中盤：後続集団が押し寄せ、全頭が固まってのデッドヒート
-            const base = 1.08 + jitter;
-            if (scenario === 0) {
-                if (idx === w) { h.targetLaneX = 14; return 1.2; }
-                if (idx === s) return 1.15 + jitter;
-            } else if (scenario === 1) {
-                if (idx === w) { h.targetLaneX = -18; return 1.18; }
-                if (idx === s) return 1.16 + jitter;
-            } else if (scenario === 2) {
-                if (idx === w) { h.targetLaneX = 3.5; return 1.22 + Math.sin(raceTime * 3) * 0.06; }
-                if (idx === s) { h.targetLaneX = -3.5; return 1.22 - Math.sin(raceTime * 3) * 0.06; }
-            } else {
-                if (idx === w) return 1.16 + Math.sin(raceTime * 2) * 0.05;
-                if (idx === s || idx === t) return 1.18 + jitter;
-            }
-            return base;
-        };
-
-        // 最終直線プラン：各馬のゴール到達時刻を着順どおりに決め、現在速度から滑らかにつなぐ
-        const startFinalPhase = (order: BetOrder, scenario: number) => {
-            const remains = meshes.map(h => Math.max(0.5, h.progressZ - FINISH_Z));
-            const leadRemain = Math.min(...remains);
-            const profiles = [
-                { avg: 1.5, gap2: 0.3, gap3: 0.28, endW: 1.45 },  // 大外一気
-                { avg: 1.48, gap2: 0.26, gap3: 0.3, endW: 1.4 },  // イン強襲
-                { avg: 1.42, gap2: 0.07, gap3: 0.42, endW: 1.2 }, // 一騎打ち（ハナ差）
-                { avg: 1.36, gap2: 0.12, gap3: 0.1, endW: 1.0 },  // 逃げ粘り
-            ];
-            const p = profiles[scenario] || profiles[0];
-            const vary = (k: number) => 0.5 + 0.5 * Math.sin(seed * 0.37 + k * 1.913);
-
-            // 正解着順（重複・範囲外があっても安全に処理）
-            const top: number[] = [];
-            order.forEach(i => {
-                if (Number.isInteger(i) && i >= 0 && i < meshes.length && !top.includes(i)) top.push(i);
-            });
-
-            const winner = top.length > 0 ? top[0] : 0;
-            let tw = remains[winner] / (SPEED_SCALE * p.avg);
-            tw = Math.max(tw, leadRemain / (SPEED_SCALE * 1.35), remains[winner] / (SPEED_SCALE * 1.9));
-
-            const gaps = [0, p.gap2 * (0.8 + 0.4 * vary(1)), p.gap3 * (0.8 + 0.4 * vary(2))];
-            const endFactors = [p.endW, 1.1, 1.0];
-            const arrival = new Array<number>(meshes.length).fill(0);
-            const endFactor = new Array<number>(meshes.length).fill(0.8);
-            let tCursor = tw;
-            top.forEach((idx, k) => {
-                tCursor += gaps[k] || 0.25;
-                arrival[idx] = tCursor;
-                endFactor[idx] = endFactors[k] ?? 1.0;
-            });
-            // 4着以下は現在の並びを保って順にゴール
-            const others = meshes.map((_, i) => i).filter(i => !top.includes(i)).sort((a, b) => remains[a] - remains[b]);
-            tCursor += 0.3;
-            others.forEach((idx, k) => {
-                tCursor += 0.15 + 0.15 * vary(k + 3);
-                arrival[idx] = tCursor;
-            });
-
-            meshes.forEach((h, i) => {
-                if (h.finished) { plans[i] = null; return; }
-                const T = Math.max(0.5, arrival[i]);
-                const dist = remains[i];
-                const avgV = dist / T;
-                const m0 = clamp((h.currentSpeed * SPEED_SCALE) / avgV, 0.2, 2.2);
-                const m1 = clamp(endFactor[i], 0.2, 2.0);
-                plans[i] = { t0: raceTime, T, startZ: h.progressZ, dist, m0, m1 };
-            });
-
-            // 最終直線のコース取り（シナリオ別）
-            const laneSets: number[][] = [[14, -4, 4], [-18, 6, -2], [3.5, -3.5, 9], [0, -4.5, 4.5]];
-            const lanes = laneSets[scenario] || laneSets[0];
-            top.forEach((idx, k) => { meshes[idx].targetLaneX = lanes[k]; });
-        };
-
-        const stepRace = (dt: number, order: BetOrder, scenario: number, isRacing: boolean) => {
-            raceTime += dt;
-            if (isRacing && !finalPhaseStarted) {
-                const leadRemain = Math.min(...meshes.map(h => h.progressZ - FINISH_Z));
-                if (leadRemain <= FINAL_PHASE_TRIGGER) {
-                    finalPhaseStarted = true;
-                    startFinalPhase(order, scenario);
-                }
-            }
-            meshes.forEach((h, idx) => {
-                h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 2.2);
-
-                // ゴール後 / レース外：徐々に減速して流し、自然に止まる
-                if (h.finished || (!isRacing && !plans[idx])) {
-                    h.currentSpeed = Math.max(0, h.currentSpeed - dt * 0.4);
-                    h.progressZ = Math.max(STOP_Z, h.progressZ - h.currentSpeed * SPEED_SCALE * dt);
-                    return;
-                }
-
-                const plan = plans[idx];
-                if (plan) {
-                    const u = (raceTime - plan.t0) / plan.T;
-                    if (u >= 1) {
-                        h.progressZ = FINISH_Z;
-                        h.currentSpeed = (plan.dist / plan.T) * plan.m1 / SPEED_SCALE;
-                        h.finished = true;
-                    } else {
-                        h.progressZ = plan.startZ - plan.dist * hermite(u, plan.m0, plan.m1);
-                        h.currentSpeed = Math.max(0.05, (plan.dist / plan.T) * hermiteD(u, plan.m0, plan.m1) / SPEED_SCALE);
-                    }
-                    return;
-                }
-
-                // 道中：目標速度へ滑らかに加減速（急なワープ・カクつきを防ぐ）
-                const target = preFinalTargetSpeed(h, idx, h.progressZ - FINISH_Z, order, scenario);
-                h.currentSpeed += (target - h.currentSpeed) * Math.min(1, dt * 2.0);
-                h.progressZ -= h.currentSpeed * SPEED_SCALE * dt;
-                if (h.progressZ <= FINISH_Z) {
-                    h.progressZ = FINISH_Z;
-                    h.finished = true;
-                }
-            });
-        };
-
         const renderLoop = () => {
             frameId = requestAnimationFrame(renderLoop);
-            // 実時間ベース。タブ復帰時のワープ防止のため1フレーム最大0.1秒まで
             const now = performance.now();
-            const delta = Math.min((now - lastTime) / 1000, 0.1);
+            const delta = Math.min((now - lastTime) / 1000, 0.25);
             lastTime = now;
+            elapsed += delta;
 
-            // 新しい発走／リセットを検知したらレース内部状態を初期化（それ以外では絶対に巻き戻さない）
-            if (runSeen !== raceRunRef.current) {
-                runSeen = raceRunRef.current;
-                raceTime = 0;
-                runActive = false;
-                finalPhaseStarted = false;
-                plans = meshes.map(() => null);
-                seed = Math.random() * 1000;
-                finishCooldown = -1;
-                gallopTimer = 0;
-                rankUpdateTimer = 0;
-                focusInitialized = false;
-            }
+            const status = statusRef.current;
+            const order = orderRef.current;
+            const startedAt = startedAtRef.current;
+            const durationSec = (durationRef.current ?? 0) / 1000;
+            const raceIdx = raceIndexRef.current;
+            const key = raceKeyRef.current;
+            const inRace = (status === 'racing' || status === 'result') && startedAt !== null && order !== null && durationSec > 0;
 
-            const currentStatus = statusRef.current;
-            const isRacing = currentStatus === 'racing';
-            if (isRacing) runActive = true;
-            const order = correctOrderRef.current;
-            // レースごとに異なる4種類のドラマチック演出シナリオ（大外一気、イン強襲、壮絶一騎打ち、逃げ粘り）
-            const scenario = Math.abs(raceIndexRef.current || 0) % 4;
-
-            const simActive = isRacing || (runActive && currentStatus === 'result');
-            if (simActive) {
-                let remaining = delta;
-                while (remaining > 1e-6) {
-                    const dt = Math.min(MAX_STEP, remaining);
-                    stepRace(dt, order, scenario, isRacing);
-                    remaining -= dt;
+            if (inRace) {
+                if (simKey !== key) {
+                    sim = createSimState();
+                    simKey = key;
+                    snapCamera = true;
+                    maxSimT = 0;
+                    focusInitialized = false;
                 }
+                let targetT = status === 'racing'
+                    ? Math.max(0, Math.min(durationSec, (Date.now() + clockOffsetRef.current - startedAt) / 1000))
+                    : durationSec;
+                // 巻き戻り防止ガード：同一レース中は targetT が過去に戻らないようにする
+                if (status === 'racing') {
+                    targetT = Math.max(targetT, maxSimT);
+                    maxSimT = targetT;
+                }
+                sim = advanceSimTo(sim, targetT, order, raceIdx);
+            } else if (simKey !== 'idle') {
+                sim = createSimState();
+                simKey = 'idle';
+                snapCamera = true;
+                maxSimT = 0;
+                focusInitialized = false;
+                writeRemain(1000);
+                writeCommentary(INITIAL_COMMENTARY);
+                setRealtimeRanks([0, 1, 2, 3, 4, 5, 6, 7]);
+            }
+            const running = status === 'racing' && inRace && !sim.done;
+
+            // ゴール → 結果表示へ（1レース1回だけ）
+            if (status === 'racing' && inRace && sim.done && localFinishedRef.current !== key) {
+                onLocalFinishRef.current(key);
             }
 
-            let leadHorse = meshes[0];
-            let minZ = Infinity;
-            let maxZ = -Infinity;
-            meshes.forEach((h, idx) => {
-                const moving = simActive && h.currentSpeed > 0.05;
-                gait[idx] += delta * (moving ? 17 * Math.max(0.5, h.currentSpeed) : 6);
-                const ph = gait[idx];
-
-                h.mesh.position.x = h.currentLaneX;
-                h.mesh.position.z = h.progressZ;
-                h.mesh.position.y = moving ? Math.abs(Math.sin(ph * 1.06)) * 0.28 * Math.min(1, h.currentSpeed + 0.3) : 0;
-
-                const swing = Math.sin(ph);
-                h.legs.legFL.rotation.x = swing * 0.75;
-                h.legs.legBR.rotation.x = swing * 0.75;
-                h.legs.legFR.rotation.x = -swing * 0.75;
-                h.legs.legBL.rotation.x = -swing * 0.75;
-                h.legs.head.rotation.x = -Math.PI / 8 + Math.cos(ph * 2) * 0.1;
-                h.legs.tail.rotation.z = Math.sin(ph) * 0.25;
-
-                // ゼッケン(A〜H)の丸バッジは常に最前面に描画されるため、近距離では隠す
-                h.badge.getWorldPosition(badgeWorldPos);
-                h.badge.visible = camera.position.distanceTo(badgeWorldPos) > 14;
-
-                if (h.progressZ < leadHorse.progressZ) leadHorse = h;
-                if (h.progressZ < minZ) minZ = h.progressZ;
-                if (h.progressZ > maxZ) maxZ = h.progressZ;
+            // メッシュへ反映
+            let lead = 0;
+            sim.horses.forEach((h, i) => { if (h.z < sim.horses[lead].z) lead = i; });
+            meshes.forEach((m, i) => {
+                const h = sim.horses[i];
+                const moving = running && !h.finished;
+                m.mesh.position.set(h.laneX, moving ? Math.abs(Math.sin(elapsed * 18 * h.speed)) * 0.28 : 0, h.z);
+                const legSpeed = moving ? 17 * h.speed : 6;
+                const swing = Math.sin(elapsed * legSpeed + i);
+                m.legs.legFL.rotation.x = swing * 0.75;
+                m.legs.legBR.rotation.x = swing * 0.75;
+                m.legs.legFR.rotation.x = -swing * 0.75;
+                m.legs.legBL.rotation.x = -swing * 0.75;
+                m.legs.head.rotation.x = -Math.PI / 8 + Math.cos(elapsed * legSpeed * 2) * 0.1;
+                m.legs.tail.rotation.z = Math.sin(elapsed * legSpeed) * 0.25;
+                // カメラの真横を通る馬のバッジが画面を覆わないよう近距離では隠す
+                m.badge.getWorldPosition(badgeWorldPos);
+                m.badge.visible = camera.position.distanceTo(badgeWorldPos) > 14;
             });
 
-            if (isRacing) {
+            if (running) {
                 gallopTimer += delta;
-                if (renders3D && gallopTimer > 0.18 && soundRef.current) {
+                if (gallopTimer > 0.18 && soundRef.current) {
                     soundRef.current.playGallop();
                     gallopTimer = 0;
                 }
-
-                // リアルタイム順位並び替え（約0.2秒おき）
-                rankUpdateTimer += delta;
-                if (rankUpdateTimer >= 0.2) {
-                    rankUpdateTimer = 0;
-                    const sorted = meshes
-                        .map((m, mIdx) => ({ idx: mIdx, z: m.progressZ }))
-                        .sort((a, b) => a.z - b.z)
-                        .map(item => item.idx);
-                    setRealtimeRanks(prev => {
-                        const isSame = prev.length === sorted.length && prev.every((v, i) => v === sorted[i]);
-                        return isSame ? prev : sorted;
-                    });
+                rankTimer += delta;
+                if (rankTimer >= 0.2) {
+                    rankTimer = 0;
+                    const sorted = ranksOf(sim);
+                    setRealtimeRanks(prev => (prev.every((v, i) => v === sorted[i]) ? prev : sorted));
                 }
-
-                // 残り距離
-                const remain = Math.min(1000, Math.max(0, Math.floor(leadHorse.progressZ - FINISH_Z)));
+                const leader = sim.horses[lead];
+                const remain = Math.min(1000, Math.max(0, Math.floor(leader.z - FINISH_Z)));
                 writeRemain(remain);
-
-                // 残り距離とシナリオに応じたリアルタイム迫力実況
-                if (remain > 750) {
-                    writeCommentary("全馬一斉にスタート！各馬激しいポジション争い！");
-                } else if (remain > 500) {
-                    writeCommentary("道中は目まぐるしく先頭が入れ替わる大混戦！誰が勝つか分からない！");
-                } else if (remain > 280) {
+                const scenario = scenarioOf(raceIdx);
+                if (remain > 750) writeCommentary("全馬一斉にスタート！各馬激しいポジション争い！");
+                else if (remain > 500) writeCommentary("道中は目まぐるしく先頭が入れ替わる大混戦！誰が勝つか分からない！");
+                else if (remain > 280) {
                     if (scenario === 0) writeCommentary("第4コーナー！後方から大外へ持ち出した！");
                     else if (scenario === 1) writeCommentary("第4コーナー！インコース内ラチ沿いに潜り込む！");
                     else if (scenario === 2) writeCommentary("2頭が抜け出した！壮絶な一騎打ちの様相！");
@@ -1766,46 +1172,33 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                     else if (scenario === 1) writeCommentary("残り200m！内から一閃！最短コースを電光石火で突き抜ける！");
                     else if (scenario === 2) writeCommentary("残り200m！叩き合い！並んだ！ハナ差の壮絶なデッドヒート！！");
                     else writeCommentary("残り200m！必死の二枚腰！逃げ切れるか！迫る追撃！！");
-                } else if (remain > 0) {
-                    writeCommentary("ゴール板前！最後の力を振り絞る！大激戦のゴールインへ！！");
-                } else {
-                    writeCommentary("ゴールイン！！大歓声の中、着順が確定しました！");
-                }
-
-                // 先頭馬がゴール板を通過したら余韻タイマー（最大3秒）を開始
-                if (leadHorse.progressZ <= FINISH_Z && finishCooldown < 0) {
-                    finishCooldown = 3.0;
-                }
-                if (finishCooldown >= 0) {
-                    finishCooldown -= delta;
-                }
-
-                // 先頭ゴール後、全頭ゴールまたは余韻終了で正式確定（途中で勝手に終わらない）
-                if (!hasFinishedRef.current && finishCooldown >= 0 && (finishCooldown <= 0 || meshes.every(m => m.finished))) {
-                    statusRef.current = 'result';
-                    finalizeRaceRef.current('local');
-                }
+                } else if (remain > 0) writeCommentary("ゴール板前！最後の力を振り絞る！大激戦のゴールインへ！！");
+                else writeCommentary("ゴールイン！！大歓声の中、着順が確定しました！");
             }
 
-            // 固定カメラの平行移動：先頭寄りの馬群中心を追う（ズーム・回転は一切しない）
+            // 固定カメラの平行移動：先頭寄りの馬群中心を追う（ズーム・画角変更は一切しない）
             if (meshes.length > 0) {
+                let minZ = Infinity;
+                let maxZ = -Infinity;
+                meshes.forEach(m => {
+                    const z = m.mesh.position.z;
+                    if (z < minZ) minZ = z;
+                    if (z > maxZ) maxZ = z;
+                });
                 const packSpan = Math.min(maxZ - minZ, 40);
                 const focusTarget = minZ + packSpan * 0.45;
-                if (!focusInitialized) {
+                if (!focusInitialized || snapCamera) {
                     focusZ = focusTarget;
                     focusInitialized = true;
                 } else {
                     focusZ += (focusTarget - focusZ) * (1 - Math.exp(-delta * 5));
                 }
+                placeCamera(focusZ);
             }
-            placeCamera(focusZ);
+            snapCamera = false;
 
-            // スクリーン枠が表示されている時だけ描画（非表示中もレース進行は継続）
-            if (containerElRef.current) {
-                renderer?.render(scene, camera);
-            }
+            if (containerElRef.current) renderer?.render(scene, camera);
         };
-
         frameId = requestAnimationFrame(renderLoop);
 
         return () => {
@@ -1821,267 +1214,193 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                     m.dispose();
                 });
             });
-            if (renderer) {
-                renderer.dispose();
-                renderer.forceContextLoss();
-                renderer.domElement.remove();
-            }
+            renderer?.dispose();
             rendererRef.current = null;
-            sceneRef.current = null;
+            sceneRefClear();
+        };
+        function sceneRefClear() {
             cameraRef.current = null;
-            horseMeshesRef.current = [];
-        };
-    }, [isMounted, runsSimulation, renders3D, attachRendererToContainer, writeRemain, writeCommentary]);
-
-    // アンマウント時に ResizeObserver を解放
-    useEffect(() => () => resizeObserverRef.current?.disconnect(), []);
+        }
+    }, [isMounted, renders3D, attachRendererToContainer, writeRemain, writeCommentary]);
 
     // --------------------------------------------------------------
-    // 進行操作
+    // 派生値
     // --------------------------------------------------------------
-    const startDerbyRace = useCallback(() => {
-        if (statusRef.current === 'racing') return;
-        finishedRacesRef.current.delete(currentRaceIndex);
-        hasFinishedRef.current = false;
-        runIdRef.current = `${currentRaceIndex}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        resetHorsePositions();
-        statusRef.current = 'racing';
-        setGameStatus('racing');
-        soundRef.current?.playFanfare();
-        broadcastGameState('racing', currentRaceIndex, correctOrder);
-        // DB にレース発走状態を記録
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'update_game', status: 'racing', currentRaceIndex, correctOrder })
-        }).catch(err => console.error("Start race DB error:", err));
+    const currentRace: DerbyRace = races[currentRaceIndex] || {
+        id: 'r_dummy', roundIndex: currentRaceIndex, name: `第${currentRaceIndex + 1}レース`,
+        question: '問題を読み込み中…', options: HORSES_DATA.map(h => h.name), correctOrder: []
+    };
 
-        // 保険：スクリーンからのゴール通知が届かない場合でも65秒で確定（通常は約28〜32秒でゴール）
-        const raceAtStart = currentRaceIndex;
-        window.setTimeout(() => {
-            if (statusRef.current === 'racing' && raceIndexRef.current === raceAtStart) {
-                finalizeRaceRef.current('local');
-            }
-        }, 65000);
-    }, [currentRaceIndex, correctOrder, resetHorsePositions, broadcastGameState]);
+    // 単勝オッズ・配当計算
+    const odds = useMemo(() => computeWinOdds(participants.map(p => p.betSlip)), [participants]);
 
-    const goToRace = useCallback((idx: number, broadcast: boolean) => {
-        const race = races[idx];
-        if (!race) return;
-        finishedRacesRef.current.delete(idx);
-        hasFinishedRef.current = false;
-        const newOrder = race.correctOrder || [0, 1, 2];
-        setCurrentRaceIndex(idx);
-        setGameStatus('idle');
-        statusRef.current = 'idle';
-        setIssuedBetSlip(null);
-        setSelectedChoices([]);
-        setRealtimeRanks([0, 1, 2, 3, 4, 5, 6, 7]);
-        setCorrectOrder(newOrder);
-        correctOrderRef.current = newOrder;
-        // 前レースの馬券は破棄
-        setParticipants(prev => prev.map(p => ({ ...p, betSlip: null })));
-        resetHorsePositions();
-        if (broadcast) {
-            broadcastGameState('idle', idx, newOrder);
-            void fetch('/api/trifecta', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type: 'update_game', status: 'idle', currentRaceIndex: idx, correctOrder: newOrder })
-            }).then(() => {
-                sendEvent('refresh-data', {});
-            }).catch(err => console.error("Go to race DB error:", err));
-        }
-    }, [races, resetHorsePositions, broadcastGameState, sendEvent]);
+    // 参加者の自分の馬券・判定
+    const myBet = useMemo(() => {
+        const me = participants.find(p => p.id === participantId);
+        return me?.betSlip ?? null;
+    }, [participants, participantId]);
 
-    // 新規レース追加（その都度レースを設定可能、得点は累積合算）
-    const addNewRace = useCallback(() => {
-        const newRound = races.length;
-        const newRace: DerbyRace = {
-            id: `race_${newRound + 1}_${Date.now()}`,
-            roundIndex: newRound,
-            name: `第${newRound + 1}R：特別レース`,
-            question: `第${newRound + 1}レースのお題を入力してください`,
-            options: [
-                "選択肢 A", "選択肢 B", "選択肢 C", "選択肢 D",
-                "選択肢 E", "選択肢 F", "選択肢 G", "選択肢 H"
-            ],
-            correctOrder: [0, 1, 2]
-        };
-        const updated = [...races, newRace];
-        setRaces(updated);
-        setCurrentRaceIndex(newRound);
-        try {
-            localStorage.setItem('derby_saved_races', JSON.stringify(updated));
-        } catch (e) {
-            console.warn(e);
-        }
-        setToastMessage(`第${newRound + 1}Rを追加しました。「編集内容を保存」でDBに保存してください`);
-    }, [races]);
+    const myResult = useMemo(() => {
+        if (!correctOrder || !myBet) return null;
+        return judgeBet(myBet, correctOrder);
+    }, [correctOrder, myBet]);
 
-    const deleteCurrentRace = useCallback(() => {
-        if (races.length <= 1) {
-            setToastMessage('これ以上レースを削除できません（最低1レース必要です）');
+    // 総合順位（同点は同順位）
+    const ranked = useMemo(() => {
+        const sorted = [...participants].sort((a, b) => b.score - a.score);
+        return sorted;
+    }, [participants]);
+
+    // --------------------------------------------------------------
+    // ユーザー操作
+    // --------------------------------------------------------------
+    const confirm = (opts: Omit<ConfirmDialogState, 'isOpen'>) => setConfirmDialog({ isOpen: true, ...opts });
+    const closeConfirm = () => setConfirmDialog(CLOSED_DIALOG);
+
+    // 幹事ログイン
+    const hostLogin = async () => {
+        setLoginError(null);
+        setHostBusy(true);
+        const r = await postAction('verify_host', { password: loginInput });
+        setHostBusy(false);
+        if (!r.ok) {
+            setLoginError('パスワードが正しくありません');
             return;
         }
-        const updated = races.filter((_, idx) => idx !== currentRaceIndex);
-        setRaces(updated);
-        const nextIdx = Math.max(0, currentRaceIndex - 1);
-        setCurrentRaceIndex(nextIdx);
-        try {
-            localStorage.setItem('derby_saved_races', JSON.stringify(updated));
-        } catch (e) {
-            console.warn(e);
+        setHostPassword(loginInput);
+        setHostAuthed(true);
+        try { sessionStorage.setItem(HOST_PW_KEY, loginInput); } catch { /* noop */ }
+    };
+
+    // 幹事：レース開始（出走）
+    const startRace = () => {
+        if (!correctOrder || correctOrder.length < 3) {
+            setToastMessage('正解着順（1〜3着）が設定されていません。「問題登録」タブで設定してください');
+            return;
         }
-        setToastMessage('レースを削除しました。「編集内容を保存」でDBに保存してください');
-    }, [races, currentRaceIndex]);
+        confirm({
+            title: `第${currentRaceIndex + 1}レースを発走しますか？`,
+            message: '投票の受付を終了し、ファンファーレとともにレースを開始します。',
+            confirmLabel: '発走！',
+            onConfirm: () => {
+                closeConfirm();
+                void runHost('start_race', {}, '発走しました！');
+            }
+        });
+    };
 
-    const goToNextRace = useCallback(() => {
-        if (currentRaceIndex < races.length - 1) {
-            goToRace(currentRaceIndex + 1, true);
-            soundRef.current?.playFanfare();
-        } else {
-            // 次のレースがない場合は新レースを追加して待機画面へ遷移
-            addNewRace();
-            setGameStatus('idle');
-            statusRef.current = 'idle';
-            resetHorsePositions();
-            broadcastGameState('idle', races.length, [0, 1, 2]);
-            soundRef.current?.playFanfare();
-            setToastMessage(`第${races.length + 1}Rを追加し、発走前待機画面へ進みました`);
+    // 幹事：次のレースへ
+    const nextRace = () => {
+        const nextIdx = currentRaceIndex + 1;
+        if (nextIdx >= races.length) {
+            openGrandFinale();
+            return;
         }
-    }, [currentRaceIndex, races.length, goToRace, addNewRace, resetHorsePositions, broadcastGameState]);
+        confirm({
+            title: `第${nextIdx + 1}レースへ進みますか？`,
+            message: `現在の第${currentRaceIndex + 1}レースを終了し、第${nextIdx + 1}レースの投票受付を開始します。`,
+            confirmLabel: '進む',
+            onConfirm: () => {
+                closeConfirm();
+                void runHost('set_race_index', { index: nextIdx }, `第${nextIdx + 1}レースに切り替えました`);
+            }
+        });
+    };
 
-    const goToGrandFinale = useCallback(() => {
-        setGameStatus('grand_finale');
-        statusRef.current = 'grand_finale';
-        soundRef.current?.playFanfare();
-        soundRef.current?.playCheers();
-        broadcastGameState('grand_finale', currentRaceIndex, correctOrder);
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'update_game', status: 'grand_finale' })
-        }).catch(err => console.error("Grand finale DB error:", err));
-    }, [currentRaceIndex, correctOrder, broadcastGameState]);
+    // 幹事：前のレースへ
+    const prevRace = () => {
+        if (currentRaceIndex <= 0) return;
+        confirm({
+            title: `第${currentRaceIndex}レースに戻りますか？`,
+            message: '前のレースの投票受付画面に戻します。',
+            confirmLabel: '戻る',
+            onConfirm: () => {
+                closeConfirm();
+                void runHost('set_race_index', { index: currentRaceIndex - 1 });
+            }
+        });
+    };
 
-    const rebetCurrentRace = useCallback(() => {
-        finishedRacesRef.current.delete(currentRaceIndex);
-        hasFinishedRef.current = false;
-        setGameStatus('idle');
-        statusRef.current = 'idle';
-        setIssuedBetSlip(null);
-        setSelectedChoices([]);
-        resetHorsePositions();
-        broadcastGameState('idle', currentRaceIndex, correctOrder);
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'rebet', raceIndex: currentRaceIndex })
-        }).then(() => {
-            void loadInitialDataFromDB();
-            sendEvent('refresh-data', {});
-        }).catch(err => console.error("Rebet DB error:", err));
-    }, [currentRaceIndex, correctOrder, resetHorsePositions, broadcastGameState, loadInitialDataFromDB, sendEvent]);
+    // 幹事：今のレースをやり直す
+    const resetCurrentRace = () => {
+        confirm({
+            title: `第${currentRaceIndex + 1}レースをやり直しますか？`,
+            message: '投票受付中の状態に戻します（参加者の投票は保持されます）。間違えて発走してしまった場合に使ってください。',
+            confirmLabel: '受付中に戻す',
+            onConfirm: () => {
+                closeConfirm();
+                void runHost('reset_race', {}, '受付中に戻しました');
+            }
+        });
+    };
 
-    const resetEntireTournament = useCallback(() => {
-        finishedRacesRef.current.clear();
-        hasFinishedRef.current = false;
-        const firstRace = races[0];
-        const newOrder = firstRace?.correctOrder || [6, 4, 0];
-        setCurrentRaceIndex(0);
-        setGameStatus('idle');
-        statusRef.current = 'idle';
-        setParticipantScore(0);
-        setIssuedBetSlip(null);
-        setSelectedChoices([]);
-        setParticipants(prev => prev.map(p => ({ ...p, score: 0, betSlip: null })));
-        resetHorsePositions();
-        setCorrectOrder(newOrder);
-        broadcastGameState('idle', 0, newOrder);
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'reset_tournament' })
-        }).then(() => {
-            void loadInitialDataFromDB();
-            sendEvent('refresh-data', {});
-        }).catch(err => console.error("Reset DB error:", err));
-    }, [races, resetHorsePositions, broadcastGameState, loadInitialDataFromDB, sendEvent]);
+    // 幹事：全得点リセット
+    const resetAllGame = () => {
+        confirm({
+            title: '全参加者の得点をリセットしますか？',
+            message: 'すべての参加者のスコアと投票が0クリアされ、第1レースの受付中に戻ります。本番前にテストしたデータを消す時に使ってください。問題の内容は消えません。',
+            confirmLabel: 'すべてリセット',
+            danger: true,
+            onConfirm: () => {
+                closeConfirm();
+                void runHost('reset_all', {}, 'ゲームをリセットしました');
+            }
+        });
+    };
 
-    // 幹事：正解着順の変更（他順位と自動スワップ）＋ races・DB・リアルタイム同期へ即時反映
-    const updateCorrectOrder = useCallback((rank: number, val: number) => {
-        const current = [...(correctOrderRef.current || [0, 1, 2])];
-        const next: BetOrder = [current[0] ?? 0, current[1] ?? 1, current[2] ?? 2];
+    // 幹事：表彰
+    const openGrandFinale = () => void runHost('set_status', { status: 'grand_finale' });
+    const closeGrandFinale = () => void runHost('set_status', { status: 'result' });
 
-        // 既に他の着順に入っている場合は入れ替え（スワップ）
-        const existingIdx = next.findIndex((c, rIdx) => rIdx !== rank && c === val);
-        if (existingIdx !== -1) {
-            next[existingIdx] = next[rank];
+    // 幹事：問題編集の下書き
+    const draftDirty = draftRaces !== null;
+    const activeEditRace = (draftRaces ?? races)[editRaceIndex] || currentRace;
+    const updateDraftRace = (patch: Partial<DerbyRace>) => {
+        const base = draftRaces ?? races;
+        const list = base.map((r, i) => (i === editRaceIndex ? { ...r, ...patch } : r));
+        setDraftRaces(list);
+    };
+    const addDraftRace = () => {
+        const base = draftRaces ?? races;
+        const newRace: DerbyRace = {
+            id: `r_${Date.now()}`,
+            roundIndex: base.length,
+            name: `第${base.length + 1}レース`,
+            question: '新しい問題',
+            options: HORSES_DATA.map((h, i) => `選択肢 ${h.letter}`),
+            correctOrder: [0, 1, 2]
+        };
+        const list = [...base, newRace];
+        setDraftRaces(list);
+        setEditRaceIndex(list.length - 1);
+    };
+    const deleteDraftRace = () => {
+        const list = draftRaces ?? races;
+        if (list.length <= 1) {
+            setToastMessage('問題は最低1つ必要です');
+            return;
         }
-        next[rank] = val;
-
-        correctOrderRef.current = next;
-        setCorrectOrder(next);
-
-        // races 側にも保持
-        const updatedRaces = races.map((r, i) => (i === currentRaceIndex ? { ...r, correctOrder: next } : r));
-        setRaces(updatedRaces);
-
-        try {
-            localStorage.setItem('derby_saved_races', JSON.stringify(updatedRaces));
-        } catch (e) {
-            console.warn(e);
-        }
-
-        // リアルタイム配信
-        broadcastGameState(statusRef.current, currentRaceIndex, next);
-
-        // DBへ即座に永続化（定期同期などで古いデータに戻るのを防止）
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                type: 'update_game',
-                status: statusRef.current,
-                currentRaceIndex,
-                correctOrder: next
-            })
-        }).catch(err => console.error("Update game correctOrder error:", err));
-
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                type: 'save_races',
-                races: updatedRaces.map((r, i) => ({
-                    id: r.id,
-                    roundIndex: i,
-                    name: r.name,
-                    question: r.question,
-                    options: r.options,
-                    correctOrder: r.correctOrder
-                }))
-            })
-        }).catch(err => console.error("Save races correctOrder error:", err));
-
-        setToastMessage(`第${currentRaceIndex + 1}Rの正解着順を更新しました`);
-    }, [currentRaceIndex, races, broadcastGameState]);
-
-    // 問題編集（イミュータブル更新：以前は DEFAULT_DERBY_RACES 自体を書き換えていた）
-    const updateRaceField = useCallback((field: 'name' | 'question', value: string) => {
-        setRaces(prev => prev.map((r, i) => (i === currentRaceIndex ? { ...r, [field]: value } : r)));
-    }, [currentRaceIndex]);
-
-    const updateRaceOption = useCallback((optIdx: number, value: string) => {
-        setRaces(prev => prev.map((r, i) => {
-            if (i !== currentRaceIndex) return r;
-            const options = [...r.options];
-            options[optIdx] = value;
-            return { ...r, options };
-        }));
-    }, [currentRaceIndex]);
-
+        confirm({
+            title: `第${editRaceIndex + 1}Rを削除しますか？`,
+            message: 'この設問と選択肢を下書きから削除します。「編集内容を保存」を押すまで本番には反映されません。',
+            confirmLabel: '削除する',
+            danger: true,
+            onConfirm: () => {
+                closeConfirm();
+                const updated = (draftRaces ?? races).filter((_, i) => i !== editRaceIndex);
+                setDraftRaces(updated);
+                setEditRaceIndex(i => Math.max(0, Math.min(i, updated.length - 1)));
+            }
+        });
+    };
+    const saveRaces = async () => {
+        const list = draftRaces ?? races;
+        const r = await runHost('save_races', {
+            races: list.map(x => ({ id: x.id, name: x.name, question: x.question, options: x.options }))
+        }, '問題を保存しました');
+        if (r.ok) setDraftRaces(null);
+    };
+    const discardDraft = () => setDraftRaces(null);
 
     const toggleSound = () => {
         const next = !isMuted;
@@ -2089,192 +1408,124 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         setIsMuted(next);
     };
 
+    // 参加者
+    const submitName = () => {
+        const name = nameInput.trim().slice(0, 30);
+        if (!name) return;
+        try { localStorage.setItem('derby_participant_name', name); } catch { /* noop */ }
+        setParticipantName(name);
+    };
     const handleChoiceSelect = (idx: number) => {
-        if (issuedBetSlip || gameStatus !== 'idle') return;
+        if (myBet || gameStatus !== 'idle' || betSending) return;
+        setBetError(null);
         setSelectedChoices(prev => {
             if (prev.includes(idx)) return prev.filter(i => i !== idx);
             if (prev.length < 3) return [...prev, idx];
             return prev;
         });
     };
-
-    const submitParticipantBet = () => {
-        if (selectedChoices.length !== 3 || issuedBetSlip || gameStatus !== 'idle') return;
-        const bet = [...selectedChoices];
-        setIssuedBetSlip(bet);
-        soundRef.current?.playCheers();
-        broadcastParticipantBet(bet);
-        // DB に投票を記録
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                type: 'bet',
-                participantId,
-                name: participantName,
-                betOrder: bet,
-                raceIndex: currentRaceIndex
-            })
-        }).then(() => {
-            sendEvent('refresh-data', {});
-        }).catch(err => console.error("Bet DB error:", err));
-    };
-
-    // 全参加者ランキング一覧（降順ソート）
-    const allRankedParticipants = useMemo<Participant[]>(() => {
-        // multiview では「自分（ゲスト）」も参加者として並べる。分割URLでは幹事が集めた参加者だけ
-        const list = role === 'multiview'
-            ? [{ id: participantId, name: participantName, score: participantScore, betSlip: issuedBetSlip }, ...participants.filter(p => p.id !== participantId)]
-            : [...participants];
-        return list.sort((a, b) => b.score - a.score);
-    }, [role, participantId, participantName, participantScore, issuedBetSlip, participants]);
-
-    // 単勝オッズ（投票内容から算出。1位に1票も入っていない馬は 999.9倍）
-    const horseOddsList = useMemo<string[]>(() => {
-        const voteCounts = Array(8).fill(0);
-        let totalVotes = 0;
-        allRankedParticipants.forEach(p => {
-            if (p.betSlip && p.betSlip.length > 0) {
-                const firstChoice = p.betSlip[0];
-                if (typeof firstChoice === 'number' && firstChoice >= 0 && firstChoice < 8) {
-                    voteCounts[firstChoice]++;
-                    totalVotes++;
-                }
-            }
+    const submitParticipantBet = async () => {
+        if (selectedChoices.length !== 3 || myBet || gameStatus !== 'idle' || betSending) return;
+        setBetSending(true);
+        setBetError(null);
+        const r = await postAction('bet', {
+            participantId, name: participantName, betOrder: [...selectedChoices], raceIndex: currentRaceIndex
         });
-
-        return HORSES_DATA.map((_, i) => {
-            const count = voteCounts[i];
-            if (count === 0 || totalVotes === 0) {
-                return "999.9";
-            }
-            const oddsVal = Math.max(1.0, totalVotes / count);
-            return oddsVal.toFixed(1);
-        });
-    }, [allRankedParticipants]);
-
-    // 参加者スマホに表示する自分の累計得点（ローカル即時加算とDB/リスト内スコアの確実な反映）
-    const myScore = useMemo(() => {
-        const fromList = participants.find(p => p.id === participantId)?.score;
-        return Math.max(participantScore, fromList ?? 0);
-    }, [participantScore, participants, participantId]);
-
-    // 幹事画面に表示する各画面のURL
-    const roleUrl = (r: 'play' | 'screen' | 'host') => `${origin}${basePath}/${r}`;
-    const copyText = (text: string) => {
-        try {
-            void navigator.clipboard.writeText(text);
-            setToastMessage('URLをコピーしました');
-        } catch {
-            setToastMessage('コピーできませんでした');
-        }
-    };
-
-    const submitName = () => {
-        const name = nameInput.trim().slice(0, 30);
-        if (!name) return;
-        setParticipantName(name);
-        try { localStorage.setItem('derby_participant_name', name); } catch { /* noop */ }
-        // DB に参加者登録
-        void fetch('/api/trifecta', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: 'join', participantId, name })
-        }).then(() => {
-            sendEvent('participant-join', { participantId, name });
-            sendEvent('refresh-data', {});
-        }).catch(err => console.error("Join DB error:", err));
-    };
-
-    // 進行中のゲームがあるときはホームへ戻る前に確認（得点は端末メモリにしかないため）
-    const goHome = () => {
-        const inProgress = currentRaceIndex > 0 || gameStatus !== 'idle' || allRankedParticipants.some(p => p.score > 0);
-        if (!inProgress) {
-            window.location.href = homeHref;
+        setBetSending(false);
+        if (!r.ok) {
+            setBetError(r.status === 409 ? '投票の受付が終了しています（発走済み、またはレースが切り替わりました）' : (r.error ?? '投票できませんでした'));
             return;
         }
-        setConfirmDialog({
-            isOpen: true,
-            title: 'ゲーム選択へ戻りますか？',
-            message: '進行中のレースと得点はリセットされます。参加者の画面も同期が止まります。',
-            onConfirm: () => { window.location.href = homeHref; }
-        });
+        setSelectedChoices([]);
+        if (r.duplicate) setToastMessage('このレースはすでに投票済みです');
+        else soundRef.current?.playCheers();
     };
+
+    const roleUrl = (r: 'play' | 'screen' | 'host') => `${origin}${basePath}/${r}`;
+    const copyText = (text: string) => {
+        navigator.clipboard?.writeText(text)
+            .then(() => setToastMessage('URLをコピーしました'))
+            .catch(() => setToastMessage('コピーできませんでした'));
+    };
+
+    // このレースの的中者
+    const hitList = (correctOrder ? participants : [])
+        .map(p => ({ p, r: judgeBet(p.betSlip, correctOrder) }))
+        .filter(x => x.r.score > 0)
+        .sort((a, b) => b.r.score - a.r.score);
 
     if (!isMounted) {
         return (
             <div className="min-h-screen bg-slate-950 text-amber-300 flex items-center justify-center font-mono text-xs">
-                LOADING 3連単アンケートゲーム ENGINE...
+                LOADING ウェディングサンレンタン！...
             </div>
         );
     }
 
+    // ==============================================================
+    // 画面
+    // ==============================================================
+    const hostPanelLocked = isHostRole && !hostAuthed;
+    // 開発用3画面同時ではスクリーン枠が狭いので、右側のボードを細くする
+    const overlayW = role === 'multiview' ? 'w-52' : 'w-64 sm:w-80';
+
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none overflow-x-hidden">
-            <style>{ARBITRARY_CLASS_FALLBACK_CSS}</style>
 
             {/* グローバル最上部ヘッダー（会場スクリーンでは表示しない） */}
             {role !== 'screen' && (
                 <header className="bg-slate-900/95 backdrop-blur border-b border-slate-800 px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 sticky top-0 z-50 shadow-md">
                     <div className="flex items-center gap-3">
-                        {/* 参加者に見せると誤タップで離脱するため、幹事・開発用のみ */}
-                        {(role === 'host' || role === 'multiview') && (
+                        {isHostRole && (
                             <a
                                 href={homeHref}
-                                onClick={(e) => { e.preventDefault(); goHome(); }}
                                 className="flex items-center gap-2 px-2.5 py-1 rounded-xl bg-slate-800 border border-slate-700 text-xs font-bold text-slate-300 hover:text-white hover:border-slate-600 transition-all"
                             >
                                 <LayoutGrid className="w-3.5 h-3.5 text-amber-400" />
                                 <span className="hidden sm:inline">ゲーム選択へ戻る</span>
                             </a>
                         )}
-
                         <div className="flex items-center gap-2">
                             <span className="text-base">🏇</span>
                             <div>
                                 <div className="font-bold text-xs tracking-wider text-slate-100 flex items-center gap-1.5 font-mono">
                                     <span className="font-black text-amber-400">ウェディングサンレンタン！</span>
-                                    <span className="bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] px-2 py-0.5 rounded font-mono">
-                                        第{currentRaceIndex + 1}R / 全{races.length}R
-                                    </span>
+                                    {loaded && (
+                                        <span className="bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] px-2 py-0.5 rounded font-mono">
+                                            第{currentRaceIndex + 1}R / 全{races.length}R
+                                        </span>
+                                    )}
                                 </div>
                                 <div className="text-[10px] text-slate-400 hidden md:block">披露宴・二次会 リアルタイム連動システム</div>
                             </div>
                         </div>
                     </div>
 
-                    {/* 画面切り替えタブ（開発用 multiview のみ。本番はURLで画面が固定される） */}
+                    {/* 画面切り替えタブ（開発用 multiview のみ） */}
                     {role === 'multiview' && (
                         <div className="flex items-center bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs font-bold">
-                            <button
-                                onClick={() => setDerbyRoute('multiview')}
-                                className={`px-2.5 py-1 rounded-lg transition-all ${derbyRoute === 'multiview' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                            >
-                                3画面同時
-                            </button>
-                            <button
-                                onClick={() => setDerbyRoute('screen')}
-                                className={`px-2.5 py-1 rounded-lg transition-all ${derbyRoute === 'screen' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                            >
-                                会場スクリーン
-                            </button>
-                            <button
-                                onClick={() => setDerbyRoute('play')}
-                                className={`px-2.5 py-1 rounded-lg transition-all ${derbyRoute === 'play' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                            >
-                                参加者スマホ
-                            </button>
-                            <button
-                                onClick={() => setDerbyRoute('host')}
-                                className={`px-2.5 py-1 rounded-lg transition-all ${derbyRoute === 'host' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                            >
-                                幹事管理
-                            </button>
+                            {([['multiview', '3画面同時'], ['screen', '会場スクリーン'], ['play', '参加者スマホ'], ['host', '幹事管理']] as const).map(([r, label]) => (
+                                <button
+                                    key={r}
+                                    onClick={() => setDerbyRoute(r)}
+                                    className={`px-2.5 py-1 rounded-lg transition-all ${derbyRoute === r ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
+                                >
+                                    {label}
+                                </button>
+                            ))}
                         </div>
                     )}
 
-                    {/* サウンド制御（会場スクリーンは画面内に操作あり） */}
                     <div className="flex items-center gap-2">
+                        {isHostRole && (
+                            <span
+                                title={isCloudConnected ? 'リアルタイム配信に接続中' : 'リアルタイム配信に再接続中（数秒ごとの自動同期で進行は続きます）'}
+                                className={`hidden sm:inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] border ${isCloudConnected ? 'border-emerald-700 text-emerald-300' : 'border-amber-700 text-amber-300'}`}
+                            >
+                                <span className={`w-1.5 h-1.5 rounded-full ${isCloudConnected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
+                                {isCloudConnected ? '同期中' : '自動同期中'}
+                            </span>
+                        )}
                         {role !== 'play' && (
                             <button
                                 onClick={toggleSound}
@@ -2288,917 +1539,789 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 </header>
             )}
 
-            {(
-                <main className={
-                    role === 'screen'
-                        ? 'flex-1 w-full'
-                        : role === 'play'
-                            ? 'flex-1 w-full p-2 sm:p-4 max-w-md mx-auto flex flex-col items-center'
-                            : role === 'host'
-                                ? 'flex-1 w-full p-2 sm:p-4 max-w-xl mx-auto flex flex-col'
-                                : 'flex-1 p-3 md:p-5 max-w-7xl mx-auto w-full'
-                }>
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start w-full">
+            {/* 接続エラー（全画面共通） */}
+            {loadError && (
+                <div role="alert" className={`${role === 'screen' ? 'fixed top-0 inset-x-0 z-[70]' : ''} bg-rose-950/90 border-b border-rose-800 text-rose-100 text-xs font-bold px-4 py-2 text-center`}>
+                    {loadError}
+                </div>
+            )}
 
-                        {/* -------------------------------------------------------- */}
-                        {/* [パネル A] 参加者スマホ画面 (/derby/play)                */}
-                        {/* -------------------------------------------------------- */}
-                        {(derbyRoute === 'multiview' || derbyRoute === 'play') && (
-                            <div className={`${derbyRoute === 'play' ? 'lg:col-span-12 max-w-md mx-auto w-full' : 'lg:col-span-4'} flex flex-col items-center w-full`}>
-                                {role === 'multiview' && (
-                                    <div className="w-full flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
-                                        <span className="flex items-center gap-1.5 text-slate-200">
-                                            <Smartphone className="w-3.5 h-3.5 text-rose-400" /> ① 参加者スマホ画面
-                                        </span>
-                                        <span className="text-[10px] text-slate-500 font-mono">{basePath}/play</span>
-                                    </div>
-                                )}
+            <main className={
+                role === 'screen'
+                    ? 'flex-1 w-full'
+                    : role === 'play'
+                        ? 'flex-1 w-full p-2 sm:p-4 max-w-md mx-auto flex flex-col items-center'
+                        : role === 'host'
+                            ? 'flex-1 w-full p-2 sm:p-4 max-w-xl mx-auto flex flex-col'
+                            : 'flex-1 p-3 md:p-5 max-w-7xl mx-auto w-full'
+            }>
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start w-full">
 
-                                {/* 本物のスマホ（role=play）では端末枠を描かず全画面で使う */}
-                                <div
-                                    className={role === 'play' ? 'w-full flex flex-col' : 'w-full max-w-[360px] bg-slate-950 rounded-[40px] p-2.5 shadow-2xl border-4 border-slate-800 relative overflow-hidden flex flex-col'}
-                                    style={role === 'play' ? undefined : { height: 670 }}
-                                >
-                                    <div className={role === 'play' ? 'w-full bg-slate-950 p-3 space-y-3' : 'w-full h-full rounded-[30px] overflow-y-auto bg-slate-950 border border-slate-900 p-3 space-y-3'}>
-                                        {role === 'play' && !participantName ? (
-                                            <div className="bg-slate-900 border border-amber-500/40 p-4 rounded-xl space-y-3 mt-6">
-                                                <div className="text-2xl text-center">🏇</div>
-                                                <div className="text-sm font-black text-white text-center">ウェディングサンレンタン！に参加</div>
-                                                <p className="text-xs text-slate-400 text-center">ランキングに表示する名前を入力してください</p>
-                                                <input
-                                                    type="text"
-                                                    value={nameInput}
-                                                    maxLength={30}
-                                                    onChange={(e) => setNameInput(e.target.value)}
-                                                    onKeyDown={(e) => { if (e.key === 'Enter') submitName(); }}
-                                                    placeholder="例：新郎友人・たけし"
-                                                    className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
-                                                />
-                                                <button
-                                                    onClick={submitName}
-                                                    disabled={!nameInput.trim()}
-                                                    className={`w-full py-2.5 rounded-xl font-black text-sm ${nameInput.trim() ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-600'}`}
-                                                >
-                                                    参加する
-                                                </button>
+                    {/* -------------------------------------------------------- */}
+                    {/* [パネル A] 参加者スマホ画面                              */}
+                    {/* -------------------------------------------------------- */}
+                    {(derbyRoute === 'multiview' || derbyRoute === 'play') && (
+                        <div className={`${derbyRoute === 'play' ? 'lg:col-span-12 max-w-md mx-auto w-full' : 'lg:col-span-4'} flex flex-col items-center w-full`}>
+                            {role === 'multiview' && (
+                                <div className="w-full flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
+                                    <span className="flex items-center gap-1.5 text-slate-200">
+                                        <Smartphone className="w-3.5 h-3.5 text-rose-400" /> ① 参加者スマホ画面
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 font-mono">{basePath}/play</span>
+                                </div>
+                            )}
+
+                            <div
+                                className={role === 'play' ? 'w-full flex flex-col' : 'w-full max-w-[360px] bg-slate-950 rounded-[40px] p-2.5 shadow-2xl border-4 border-slate-800 relative overflow-hidden flex flex-col'}
+                                style={role === 'play' ? undefined : { height: 670 }}
+                            >
+                                <div className={role === 'play' ? 'w-full bg-slate-950 p-3 space-y-3' : 'w-full h-full rounded-[30px] overflow-y-auto bg-slate-950 border border-slate-900 p-3 space-y-3'}>
+                                    {!loaded ? (
+                                        <div className="text-center text-xs text-slate-400 py-10">接続中…</div>
+                                    ) : !participantName ? (
+                                        <div className="bg-slate-900 border border-amber-500/40 p-4 rounded-xl space-y-3 mt-6">
+                                            <div className="text-2xl text-center">🏇</div>
+                                            <div className="text-sm font-black text-white text-center">ウェディングサンレンタン！に参加</div>
+                                            <p className="text-xs text-slate-400 text-center">ランキングに表示する名前を入力してください</p>
+                                            <input
+                                                type="text"
+                                                value={nameInput}
+                                                maxLength={30}
+                                                onChange={(e) => setNameInput(e.target.value)}
+                                                onKeyDown={(e) => { if (e.key === 'Enter') submitName(); }}
+                                                placeholder="例：新郎友人・たけし"
+                                                className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-xs text-white"
+                                            />
+                                            <button
+                                                onClick={submitName}
+                                                disabled={!nameInput.trim()}
+                                                className="w-full py-2.5 rounded-xl font-black text-xs bg-amber-500 text-slate-950 disabled:bg-slate-800 disabled:text-slate-600"
+                                            >
+                                                参加する
+                                            </button>
+                                        </div>
+                                    ) : (<>
+                                        {/* ユーザーヘッダー */}
+                                        <div className="flex items-center justify-between bg-slate-900/90 border border-slate-800 px-3 py-2 rounded-xl">
+                                            <div className="flex items-center gap-2 truncate">
+                                                <span className="text-xs">👤</span>
+                                                <span className="font-bold text-xs text-white truncate max-w-[120px]">{participantName}</span>
                                             </div>
-                                        ) : (<>
-
-                                            {/* スマホヘッダー */}
-                                            <div className="bg-slate-900 border border-slate-800 p-2.5 rounded-xl flex items-center justify-between">
-                                                <div>
-                                                    <div className="text-xs font-bold text-white truncate max-w-[160px]">{participantName}</div>
-                                                </div>
-                                                <div className="bg-amber-500/20 border border-amber-500/40 text-amber-300 font-black text-xs px-2.5 py-0.5 rounded-full font-mono">
-                                                    {myScore} pt
-                                                </div>
+                                            <div className="flex items-center gap-1.5 font-mono">
+                                                <span className="text-[10px] text-slate-400">現在</span>
+                                                <span className="text-sm font-black text-amber-400">
+                                                    {participants.find(p => p.id === participantId)?.score ?? 0} pt
+                                                </span>
                                             </div>
+                                        </div>
 
-                                            {/* お題カード */}
-                                            <div className="bg-slate-900 border border-slate-800 p-3 rounded-xl shadow">
-                                                <div className="flex items-center justify-between mb-1">
-                                                    <span className="text-[10px] font-bold text-amber-400 font-mono">{currentRace.name}</span>
-                                                </div>
-                                                <div className="text-xs sm:text-sm font-bold text-white leading-snug">{currentRace.question}</div>
+                                        {/* レース情報 */}
+                                        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 space-y-1.5">
+                                            <div className="flex items-center justify-between text-[11px] font-mono">
+                                                <span className="text-amber-400 font-bold">第{currentRaceIndex + 1}レース / 全{races.length}R</span>
+                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${gameStatus === 'idle' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : gameStatus === 'racing' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse' : 'bg-slate-800 text-slate-400'}`}>
+                                                    {gameStatus === 'idle' ? '投票受付中' : gameStatus === 'racing' ? '出走中！' : '着順確定'}
+                                                </span>
                                             </div>
+                                            <h3 className="text-sm font-black text-white">{currentRace.name}</h3>
+                                            <p className="text-xs text-slate-300 leading-relaxed font-bold">{currentRace.question}</p>
+                                        </div>
 
-                                            {/* レース中のスマホ案内 */}
-                                            {gameStatus === 'racing' && (
-                                                <div className="bg-slate-900 border border-amber-500/40 p-5 rounded-xl text-center space-y-2 shadow">
-                                                    <div className="text-2xl animate-bounce">🏇</div>
-                                                    <div className="text-sm font-black text-white">第{currentRaceIndex + 1}R レース発走中！</div>
-                                                    <p className="text-[11px] text-amber-300">
-                                                        会場のメインスクリーンにご注目ください！！
-                                                    </p>
+                                        {/* 投票済み表示 */}
+                                        {myBet ? (
+                                            <div className="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-3 space-y-2">
+                                                <div className="flex items-center justify-between text-xs">
+                                                    <span className="text-amber-300 font-bold">あなたの3連単予想</span>
+                                                    <span className="text-[10px] text-emerald-400 font-mono">投票完了</span>
                                                 </div>
-                                            )}
-
-                                            {/* 結果表示時のスマホ案内 */}
-                                            {gameStatus === 'result' && (
-                                                <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl text-center space-y-2 shadow">
-                                                    <span className="text-[10px] text-slate-400 font-bold block">第{currentRaceIndex + 1}R 判定結果</span>
-                                                    {issuedBetSlip ? (
-                                                        (() => {
-                                                            const detail = getBetDetail(issuedBetSlip, correctOrder);
-                                                            let color = "bg-slate-800 text-slate-400";
-                                                            if (detail.type === 'sanrentan') color = "bg-amber-500 text-slate-950 font-black";
-                                                            else if (detail.type === 'sanrenpuku') color = "bg-emerald-500 text-slate-950 font-black";
-                                                            else if (detail.type === 'nirentan') color = "bg-blue-500 text-white font-black";
-                                                            else if (detail.type === 'pukupuku') color = "bg-purple-500 text-white font-black";
-                                                            else if (detail.type === 'tan') color = "bg-teal-500 text-white font-black";
-                                                            return (
-                                                                <div className={`p-2.5 rounded-lg text-xs font-bold ${color}`}>
-                                                                    {detail.description}
+                                                <div className="grid grid-cols-3 gap-2">
+                                                    {myBet.slice(0, 3).map((hIdx, i) => {
+                                                        const h = HORSES_DATA[hIdx];
+                                                        return (
+                                                            <div key={i} className="bg-slate-950 rounded-xl p-2 text-center border border-slate-800">
+                                                                <div className="text-[10px] text-slate-400 font-bold">{i + 1}着</div>
+                                                                <div className="w-6 h-6 rounded mx-auto my-1 flex items-center justify-center font-black text-xs font-mono shadow" style={chipStyle(h)}>
+                                                                    {h.letter}
                                                                 </div>
-                                                            );
-                                                        })()
-                                                    ) : (
-                                                        <div className="text-xs text-slate-400">未投票でした</div>
-                                                    )}
-                                                    <p className="text-[10px] text-slate-400">幹事が次のレースへ進めるまでお待ちください</p>
+                                                                <div className="text-[11px] font-bold text-white truncate">{currentRace.options[hIdx] || h.name}</div>
+                                                            </div>
+                                                        );
+                                                    })}
                                                 </div>
-                                            )}
 
-                                            {/* 結果発表中のスマホ案内 */}
-                                            {gameStatus === 'grand_finale' && (
-                                                <div className="bg-slate-900 border border-amber-500/40 p-5 rounded-2xl text-center space-y-3 shadow-xl">
-                                                    <div className="text-3xl animate-bounce">🏆</div>
-                                                    <div className="text-base font-black text-amber-300">結果発表中！</div>
-                                                    <p className="text-xs text-slate-300">
-                                                        全レース終了！会場メインスクリーンで結果発表が行われています！
-                                                    </p>
-                                                    <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 flex items-center justify-between">
-                                                        <span className="text-xs text-slate-400 font-bold">あなたの最終スコア</span>
-                                                        <span className="text-lg font-black text-amber-400 font-mono">{myScore} pt</span>
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {/* 投票フォーム */}
-                                            {gameStatus === 'idle' && (
-                                                issuedBetSlip ? (
-                                                    <div className="bg-slate-900 border border-emerald-500/40 p-4 rounded-xl text-center space-y-2.5 shadow">
-                                                        <div className="w-8 h-8 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto text-sm font-bold">
-                                                            ✓
+                                                {/* 結果発表 */}
+                                                {displayStatus === 'result' && myResult && (
+                                                    <div className="mt-2 pt-2 border-t border-slate-800 space-y-1.5 text-center">
+                                                        <div className="text-xs text-slate-400">判定</div>
+                                                        <div className={`py-1.5 px-3 rounded-xl font-black text-sm flex items-center justify-center gap-1.5 ${RANK_STYLE[myResult.type].solid}`}>
+                                                            <span>{RANK_STYLE[myResult.type].emoji}</span>
+                                                            <span>{myResult.name || '不的中'}</span>
+                                                            {myResult.score > 0 && <span className="font-mono">+{myResult.score}pt</span>}
                                                         </div>
-                                                        <div className="text-xs font-bold text-white">第{currentRaceIndex + 1}R 投票完了！</div>
-                                                        <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-1 text-left text-xs font-mono">
-                                                            {issuedBetSlip.map((hIdx, i) => (
-                                                                <div key={i} className="flex items-center gap-2 p-1.5 bg-slate-900 rounded border border-slate-800">
-                                                                    <span className="w-4 h-4 rounded text-[9px] font-bold flex items-center justify-center bg-amber-500 text-slate-950">{i + 1}</span>
-                                                                    <span className="text-[11px] font-bold text-white truncate flex-1">{currentRace.options[hIdx]}</span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            /* 投票受付フォーム */
+                                            gameStatus !== 'idle' ? (
+                                                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 text-center text-xs text-slate-400 space-y-1">
+                                                    <div className="text-amber-400 font-bold">投票受付は終了しました</div>
+                                                    <p>スクリーンでレースをお楽しみください！</p>
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-1.5">
+                                                    <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
+                                                        <span>1位・2位・3位の順にタップ</span>
+                                                        <span className="text-amber-400 font-mono font-bold">{selectedChoices.length} / 3 選択</span>
+                                                    </div>
+                                                    {HORSES_DATA.map((h, idx) => {
+                                                        const selIdx = selectedChoices.indexOf(idx);
+                                                        const isSel = selIdx !== -1;
+                                                        return (
+                                                            <button
+                                                                key={idx}
+                                                                onClick={() => handleChoiceSelect(idx)}
+                                                                disabled={betSending}
+                                                                className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between ${isSel ? 'border-amber-400 bg-amber-500/10 shadow' : 'border-slate-800 bg-slate-900 text-slate-200 hover:border-slate-700'}`}
+                                                            >
+                                                                <div className="flex items-center gap-2 flex-1 min-w-0 mr-2">
+                                                                    <span className="w-5 h-5 rounded text-xs font-black flex items-center justify-center font-mono shadow shrink-0" style={chipStyle(h)}>
+                                                                        {h.letter}
+                                                                    </span>
+                                                                    <span className="text-xs font-bold text-white truncate flex-1">{currentRace.options[idx] || h.name}</span>
+                                                                </div>
+                                                                {isSel ? (
+                                                                    <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-500 text-slate-950 shrink-0">第{selIdx + 1}位</span>
+                                                                ) : (
+                                                                    <span className="text-[10px] font-mono text-slate-500 shrink-0">{odds.odds[idx] === null ? '' : `${formatOdds(odds.odds[idx])}倍`}</span>
+                                                                )}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                    <button
+                                                        onClick={() => void submitParticipantBet()}
+                                                        disabled={selectedChoices.length !== 3 || betSending}
+                                                        className={`w-full py-2.5 rounded-xl font-black text-xs shadow transition-all ${selectedChoices.length === 3 && !betSending ? 'bg-amber-500 text-slate-950 hover:bg-amber-400' : 'bg-slate-800 text-slate-600 cursor-not-allowed'}`}
+                                                    >
+                                                        {betSending ? '送信中…' : selectedChoices.length === 3 ? (betError ? 'もう一度投票する' : 'この3連単で投票する！') : `あと ${3 - selectedChoices.length} 頭選択`}
+                                                    </button>
+                                                    {betError && (
+                                                        <p role="alert" className="text-[11px] text-rose-200 bg-rose-950/60 border border-rose-900 rounded-lg p-2">{betError}</p>
+                                                    )}
+                                                    <p className="text-[10px] text-slate-500 px-1">右の数字は単勝オッズ（みんなの1位予想から計算）</p>
+
+                                                    {/* 得点ルール */}
+                                                    <details className="bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-[11px]">
+                                                        <summary className="font-bold text-amber-300 cursor-pointer">得点ルールを見る</summary>
+                                                        <div className="mt-2 space-y-1">
+                                                            {SCORE_RULES.map(r => (
+                                                                <div key={r.pt} className="flex items-start gap-2">
+                                                                    <span className="w-8 shrink-0 font-black text-amber-300 font-mono">{r.pt}点</span>
+                                                                    <div>
+                                                                        <div className="font-bold text-white">{r.name}</div>
+                                                                        <div className="text-[10px] text-slate-400">{r.desc}</div>
+                                                                    </div>
                                                                 </div>
                                                             ))}
+                                                            <p className="text-[10px] text-slate-500 pt-1">複数当てはまる場合は、いちばん高い点数だけが入ります。</p>
                                                         </div>
-                                                        <p className="text-[10px] text-slate-400">発走までそのままお待ちください</p>
-                                                    </div>
-                                                ) : (
-                                                    <div className="space-y-1.5">
-                                                        <div className="flex items-center justify-between text-[11px] text-slate-400 px-1">
-                                                            <span>1位・2位・3位の順に選択</span>
-                                                            <span className="text-amber-400 font-mono font-bold">{selectedChoices.length} / 3 選択</span>
-                                                        </div>
-                                                        {HORSES_DATA.map((h, idx) => {
-                                                            const selIdx = selectedChoices.indexOf(idx);
-                                                            const isSel = selIdx !== -1;
-                                                            return (
-                                                                <button
-                                                                    key={idx}
-                                                                    onClick={() => handleChoiceSelect(idx)}
-                                                                    className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between ${isSel ? 'border-amber-400 bg-amber-500/10 shadow' : 'border-slate-800 bg-slate-900 text-slate-200 hover:border-slate-700'
-                                                                        }`}
-                                                                >
-                                                                    <div className="flex items-center gap-2 flex-1 min-w-0 mr-2">
-                                                                        <span className="w-5 h-5 rounded text-xs font-black flex items-center justify-center font-mono shadow text-white shrink-0" style={{ backgroundColor: h.color }}>
-                                                                            {h.letter}
-                                                                        </span>
-                                                                        <span className="text-xs font-bold text-white truncate flex-1">{currentRace.options[idx] || h.name}</span>
-                                                                    </div>
-                                                                    {isSel && (
-                                                                        <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-500 text-slate-950 shrink-0">
-                                                                            第{selIdx + 1}位
-                                                                        </span>
-                                                                    )}
-                                                                </button>
-                                                            );
-                                                        })}
-                                                        <button
-                                                            onClick={submitParticipantBet}
-                                                            disabled={selectedChoices.length !== 3}
-                                                            className={`w-full py-2.5 rounded-xl font-black text-xs shadow transition-all ${selectedChoices.length === 3 ? 'bg-amber-500 text-slate-950 hover:bg-amber-400' : 'bg-slate-800 text-slate-600 cursor-not-allowed'
-                                                                }`}
-                                                        >
-                                                            {selectedChoices.length === 3 ? 'この3連単で投票する！' : `あと ${3 - selectedChoices.length} 頭選択`}
-                                                        </button>
-                                                    </div>
-                                                )
-                                            )}
-
-                                        </>)}
-                                    </div>
+                                                    </details>
+                                                </div>
+                                            )
+                                        )}
+                                    </>)}
                                 </div>
                             </div>
-                        )}
+                        </div>
+                    )}
 
-                        {/* -------------------------------------------------------- */}
-                        {/* [パネル B] 会場メインスクリーン (/derby/screen)          */}
-                        {/* -------------------------------------------------------- */}
-                        {(derbyRoute === 'multiview' || derbyRoute === 'screen') && (
-                            <div className={`${derbyRoute === 'screen' ? 'lg:col-span-12' : 'lg:col-span-5'} flex flex-col w-full`}>
-                                {role === 'multiview' && (
-                                    <div className="flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
-                                        <span className="flex items-center gap-1.5 text-slate-200">
-                                            <Monitor className="w-3.5 h-3.5 text-amber-400" /> ② 会場プロジェクター（3D中継）
-                                        </span>
-                                        <span className="text-[10px] text-amber-400 font-mono">{basePath}/screen</span>
+                    {/* -------------------------------------------------------- */}
+                    {/* [パネル B] 会場メインスクリーン                          */}
+                    {/* -------------------------------------------------------- */}
+                    {(derbyRoute === 'multiview' || derbyRoute === 'screen') && (
+                        <div className={`${derbyRoute === 'screen' ? 'lg:col-span-12' : 'lg:col-span-5'} flex flex-col w-full`}>
+                            {role === 'multiview' && (
+                                <div className="flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
+                                    <span className="flex items-center gap-1.5 text-slate-200">
+                                        <Monitor className="w-3.5 h-3.5 text-amber-400" /> ② 会場プロジェクター（3D中継）
+                                    </span>
+                                    <span className="text-[10px] text-amber-400 font-mono">{basePath}/screen</span>
+                                </div>
+                            )}
+
+                            <div
+                                className={role === 'screen' ? 'w-full bg-slate-950 overflow-hidden flex flex-col relative' : 'w-full bg-slate-950 rounded-2xl shadow-2xl border border-slate-800 overflow-hidden flex flex-col relative'}
+                                style={{ height: role === 'screen' ? '100vh' : 670 }}
+                            >
+                                <div ref={canvasContainerRef} className="absolute inset-0 w-full h-full" />
+
+                                {webglError && (
+                                    <div className="absolute inset-0 z-10 flex items-center justify-center p-6 text-center">
+                                        <div className="text-xs text-slate-300 space-y-1">
+                                            <div className="text-amber-300 font-bold text-sm">3D表示を開始できませんでした</div>
+                                            <p>このブラウザでは WebGL が使えません。Chrome の「ハードウェアアクセラレーション」をオンにするか、別のPCで開いてください。</p>
+                                            <p>進行と得点の集計は通常どおり動きます。</p>
+                                        </div>
                                     </div>
                                 )}
 
-                                {/* 会場スクリーン（role=screen）はプロジェクター全面に表示 */}
-                                <div
-                                    className={role === 'screen' ? 'w-full bg-slate-950 overflow-hidden flex flex-col relative' : 'w-full bg-slate-950 rounded-2xl shadow-2xl border border-slate-800 overflow-hidden flex flex-col relative'}
-                                    style={{ height: role === 'screen' ? '100vh' : 670 }}
-                                >
-                                    <div ref={canvasContainerRef} className="absolute inset-0 w-full h-full" />
+                                {/* ブラウザは操作なしに音を出せないため、会場スクリーンは最初に1回クリックしてもらう */}
+                                {role === 'screen' && !audioUnlocked && (
+                                    <button
+                                        onClick={() => { soundRef.current?.init(); setAudioUnlocked(true); }}
+                                        className="absolute inset-0 z-[60] bg-slate-950/90 flex flex-col items-center justify-center gap-3 text-center"
+                                    >
+                                        <span className="text-4xl">🏇</span>
+                                        <span className="text-lg font-black text-amber-300">クリックして中継を開始</span>
+                                        <span className="text-xs text-slate-400">ファンファーレ・実況音を有効にします</span>
+                                    </button>
+                                )}
 
-                                    {webglError && (
-                                        <div className="absolute inset-0 z-10 flex items-center justify-center p-6 text-center">
-                                            <div className="text-xs text-slate-300 space-y-1">
-                                                <div className="text-amber-300 font-bold text-sm">3D表示を開始できませんでした</div>
-                                                <p>このブラウザでは WebGL が使えません。Chrome の「ハードウェアアクセラレーション」をオンにするか、別のPCで開いてください。</p>
-                                                <p>進行と得点の集計は通常どおり動きます。</p>
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* ブラウザは操作なしに音を出せないため、会場スクリーンは最初に1回クリックしてもらう */}
-                                    {role === 'screen' && !audioUnlocked && (
-                                        <button
-                                            onClick={() => { soundRef.current?.init(); setAudioUnlocked(true); }}
-                                            className="absolute inset-0 z-[60] bg-slate-950/90 flex flex-col items-center justify-center gap-3 text-center"
-                                        >
-                                            <span className="text-4xl">🏇</span>
-                                            <span className="text-lg font-black text-amber-300">クリックして中継を開始</span>
-                                            <span className="text-xs text-slate-400">ファンファーレ・実況音を有効にします</span>
-                                        </button>
-                                    )}
-
-                                    {/* スクリーン上部オーバーレイ（左：コンパクトなレース表示、右：カメラ切替・残り距離・順位変動一覧ボード） */}
-                                    <div className="absolute top-0 inset-x-0 p-3 sm:p-4 z-20 flex items-start justify-between pointer-events-none">
-                                        {/* 左上：視界を遮らないコンパクトなレース表示（壁側の1000m〜GOAL標識が一望可能） */}
-                                        <div className="flex flex-col gap-2 pointer-events-auto">
-                                            <div className="bg-slate-950/85 backdrop-blur border border-slate-700/80 rounded-xl px-3.5 py-2 shadow-xl font-mono flex items-center gap-2">
-                                                <span className="text-base sm:text-lg">🏇</span>
-                                                <div>
-                                                    <div className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">Race {currentRaceIndex + 1}</div>
-                                                    <div className="text-xs sm:text-sm font-black text-white truncate max-w-[180px] sm:max-w-xs">{currentRace.name}</div>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        {/* 右側：残り距離メーター ＋ 選択肢＆リアルタイム順位変動ボード（カメラは右斜め前の俯瞰で固定） */}
-                                        <div className="flex flex-col items-end gap-2 pointer-events-auto">
-                                            {/* 残り距離メーター（右側に設置） */}
-                                            <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-xl px-4 py-2 flex items-center justify-between shadow-xl font-mono w-64 sm:w-80">
-                                                <span className="text-xs sm:text-sm text-slate-300 font-bold">残り距離</span>
-                                                <div className="flex items-baseline gap-1">
-                                                    <span ref={remainCallbackRef} className="text-2xl sm:text-3xl text-amber-300 font-black tabular-nums">1000</span>
-                                                    <span className="text-xs sm:text-sm text-slate-400 font-bold">m</span>
-                                                </div>
-                                            </div>
-
-                                            {/* 拡大された選択肢 ＆ リアルタイム順位変動ボード（右側に設置） */}
-                                            <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-2xl p-3 shadow-2xl w-64 sm:w-80 font-mono">
-                                                <div className="text-xs sm:text-sm font-black text-amber-300 border-b border-slate-800 pb-2 mb-2 flex justify-between items-center">
-                                                    <span className="truncate max-w-[170px] sm:max-w-[200px]">{currentRace.name}</span>
-                                                    <span className="text-[11px] text-slate-400 font-bold">{gameStatus === 'racing' ? 'リアルタイム順位' : '投票数'}</span>
-                                                </div>
-                                                <div className="space-y-1.5">
-                                                    {(() => {
-                                                        const displayOrder = (gameStatus === 'racing' && realtimeRanks.length === 8)
-                                                            ? realtimeRanks
-                                                            : [0, 1, 2, 3, 4, 5, 6, 7];
-
-                                                        return displayOrder.map((hIdx, rankIdx) => {
-                                                            const h = HORSES_DATA[hIdx];
-                                                            const isRacing = gameStatus === 'racing';
-                                                            return (
-                                                                <div
-                                                                    key={h.letter}
-                                                                    className="flex items-center justify-between text-xs font-bold px-2 py-1.5 rounded-xl bg-black/60 border border-slate-800/80 shadow-sm transition-all duration-300"
-                                                                >
-                                                                    <div className="flex items-center gap-2 truncate flex-1 min-w-0">
-                                                                        {isRacing && (
-                                                                            <span className={`w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center shrink-0 ${
-                                                                                rankIdx === 0 ? 'bg-amber-400 text-slate-950 shadow' :
-                                                                                rankIdx === 1 ? 'bg-slate-200 text-slate-950' :
-                                                                                rankIdx === 2 ? 'bg-amber-700 text-white' :
-                                                                                'bg-slate-800 text-slate-300'
-                                                                            }`}>
-                                                                                {rankIdx + 1}
-                                                                            </span>
-                                                                        )}
-                                                                        <span
-                                                                            className="w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center text-black shrink-0 shadow-sm"
-                                                                            style={{ backgroundColor: h.color }}
-                                                                        >
-                                                                            {h.letter}
-                                                                        </span>
-                                                                        <span className="text-white text-xs sm:text-sm font-black truncate">
-                                                                            {currentRace.options[hIdx] || h.name}
-                                                                        </span>
-                                                                    </div>
-                                                                    <span className="text-amber-300 font-mono text-xs sm:text-sm font-black shrink-0 ml-2">
-                                                                        {horseVoteCounts[hIdx]}票
-                                                                    </span>
-                                                                </div>
-                                                            );
-                                                        });
-                                                    })()}
-                                                </div>
+                                {/* 上部オーバーレイ：左＝レース名、右＝残り距離・オッズ／順位ボード */}
+                                <div className="absolute top-0 inset-x-0 p-3 sm:p-4 z-20 flex items-start justify-between pointer-events-none">
+                                    <div className="flex flex-col gap-2 pointer-events-auto">
+                                        <div className="bg-slate-950/85 backdrop-blur border border-slate-700/80 rounded-xl px-3.5 py-2 shadow-xl font-mono flex items-center gap-2">
+                                            <span className="text-base sm:text-lg">🏇</span>
+                                            <div>
+                                                <div className="text-[10px] text-amber-400 font-bold tracking-wider">RACE {currentRaceIndex + 1}</div>
+                                                <div className="text-xs sm:text-sm font-black text-white truncate max-w-[180px] sm:max-w-xs">{currentRace.name}</div>
                                             </div>
                                         </div>
                                     </div>
 
-                                    {/* 着順確定画面（画面いっぱいフルスクリーン） */}
-                                    {gameStatus === 'result' && (
-                                        <div className="absolute inset-0 z-40 bg-slate-950/95 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6 lg:p-8 text-center animate-fade-in overflow-y-auto">
-                                            {/* 上部ヘッダー */}
-                                            <div className="shrink-0 space-y-1 sm:space-y-2">
-                                                <div className="inline-flex items-center gap-2 px-3 sm:px-5 py-1 sm:py-1.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-amber-300 font-black text-xs sm:text-sm tracking-wider shadow-lg">
-                                                    <span className="text-sm sm:text-base">🏁</span>
-                                                    <span>第{currentRaceIndex + 1}レース 確定</span>
-                                                    <span className="text-slate-500">|</span>
-                                                    <span>OFFICIAL RESULT</span>
-                                                </div>
-                                                <h1 className="text-xl sm:text-2xl lg:text-4xl font-black text-white tracking-wide drop-shadow">
-                                                    {currentRace.name}
-                                                </h1>
-                                                <p className="text-xs sm:text-sm lg:text-base text-amber-200/90 font-bold max-w-3xl mx-auto px-2">
-                                                    {currentRace.question}
-                                                </p>
+                                    <div className="flex flex-col items-end gap-2 pointer-events-auto">
+                                        {/* 残り距離 */}
+                                        <div className={`bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-xl px-4 py-2 flex items-center justify-between shadow-xl font-mono ${overlayW}`}>
+                                            <span className="text-xs sm:text-sm text-slate-300 font-bold">残り距離</span>
+                                            <div className="flex items-baseline gap-1">
+                                                <span ref={remainCallbackRef} className="text-2xl sm:text-3xl text-amber-300 font-black tabular-nums">1000</span>
+                                                <span className="text-xs sm:text-sm text-slate-400 font-bold">m</span>
                                             </div>
+                                        </div>
 
-                                            {/* 中央 3連単確定着順メガカード（1着・2着・3着 横並び3列） */}
-                                            <div className="my-auto py-2 sm:py-4 w-full max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 lg:gap-6">
-                                                {correctOrder.map((hIdx, rank) => {
+                                        {/* 単勝オッズ ＆ リアルタイム順位ボード */}
+                                        <div className={`bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-2xl p-3 shadow-2xl ${overlayW} font-mono`}>
+                                            <div className="text-xs sm:text-sm font-black text-amber-300 border-b border-slate-800 pb-2 mb-2 flex justify-between items-center gap-2">
+                                                <span>{gameStatus === 'racing' ? 'リアルタイム順位' : '単勝オッズ'}</span>
+                                                <span className="text-[11px] text-slate-400 font-bold">{odds.total}票</span>
+                                            </div>
+                                            <div className="space-y-1.5">
+                                                {(gameStatus === 'racing' ? realtimeRanks : [0, 1, 2, 3, 4, 5, 6, 7]).map((hIdx, rankIdx) => {
                                                     const h = HORSES_DATA[hIdx];
-                                                    const isFirst = rank === 0;
-                                                    const isSecond = rank === 1;
-
-                                                    const cardStyles = isFirst
-                                                        ? {
-                                                            bg: 'bg-gradient-to-b from-amber-500/25 via-slate-900/95 to-slate-950',
-                                                            border: 'border-2 border-amber-400 shadow-[0_0_35px_rgba(245,158,11,0.3)]',
-                                                            badge: 'bg-gradient-to-r from-amber-400 to-yellow-300 text-slate-950 font-black',
-                                                            label: '🥇 1着 (WINNER)',
-                                                            accent: 'text-amber-300',
-                                                            scale: 'md:scale-105 z-10'
-                                                        }
-                                                        : isSecond
-                                                        ? {
-                                                            bg: 'bg-gradient-to-b from-slate-300/15 via-slate-900/95 to-slate-950',
-                                                            border: 'border-2 border-slate-300/70 shadow-[0_0_20px_rgba(203,213,225,0.15)]',
-                                                            badge: 'bg-slate-200 text-slate-900 font-black',
-                                                            label: '🥈 2着',
-                                                            accent: 'text-slate-200',
-                                                            scale: ''
-                                                        }
-                                                        : {
-                                                            bg: 'bg-gradient-to-b from-amber-700/20 via-slate-900/95 to-slate-950',
-                                                            border: 'border-2 border-amber-600/70 shadow-[0_0_20px_rgba(180,83,9,0.15)]',
-                                                            badge: 'bg-amber-700 text-amber-100 font-black',
-                                                            label: '🥉 3着',
-                                                            accent: 'text-amber-400',
-                                                            scale: ''
-                                                        };
-
+                                                    const isRacing = gameStatus === 'racing';
+                                                    const pop = odds.popularity[hIdx];
                                                     return (
-                                                        <div
-                                                            key={rank}
-                                                            className={`${cardStyles.bg} ${cardStyles.border} ${cardStyles.scale} rounded-2xl sm:rounded-3xl p-4 sm:p-6 flex flex-col justify-between items-center text-center relative overflow-hidden transition-all`}
-                                                        >
-                                                            {/* 冠/ランクバッジ */}
-                                                            <div className={`px-3 sm:px-4 py-1 rounded-full text-xs sm:text-sm font-black mb-2 shadow ${cardStyles.badge}`}>
-                                                                {cardStyles.label}
-                                                            </div>
-
-                                                            {/* 馬番レター大バッジ */}
-                                                            <div
-                                                                className="w-14 h-14 sm:w-16 sm:h-16 lg:w-20 lg:h-20 rounded-2xl flex items-center justify-center text-white font-black text-2xl sm:text-3xl lg:text-4xl shadow-xl my-2 border-2 border-white/20"
-                                                                style={{ backgroundColor: h.color }}
-                                                            >
-                                                                {h.letter}
-                                                            </div>
-
-                                                            {/* 馬名 ＆ 選択肢テキスト */}
-                                                            <div className="my-1 sm:my-2 w-full">
-                                                                <div className="text-[10px] sm:text-xs text-slate-400 font-mono mb-1">{h.name}</div>
-                                                                <div className="text-base sm:text-lg lg:text-xl font-black text-white leading-snug break-words px-1">
-                                                                    {currentRace.options[hIdx]}
-                                                                </div>
-                                                            </div>
-
-                                                            {/* 投票数 */}
-                                                            <div className="mt-2 pt-2 border-t border-slate-800/80 w-full flex items-center justify-center gap-1.5 font-mono">
-                                                                <span className="text-[10px] sm:text-xs text-slate-400">投票数</span>
-                                                                <span className={`text-base sm:text-xl font-black ${cardStyles.accent}`}>
-                                                                    {horseVoteCounts[hIdx]}票
+                                                        <div key={h.letter} className="flex items-center justify-between text-xs font-bold px-2 py-1.5 rounded-xl bg-black/60 border border-slate-800/80 shadow-sm">
+                                                            <div className="flex items-center gap-2 truncate flex-1 min-w-0">
+                                                                {isRacing && (
+                                                                    <span className={`w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center shrink-0 ${rankIdx === 0 ? 'bg-amber-400 text-slate-950' : rankIdx === 1 ? 'bg-slate-200 text-slate-950' : rankIdx === 2 ? 'bg-amber-700 text-white' : 'bg-slate-800 text-slate-300'}`}>
+                                                                        {rankIdx + 1}
+                                                                    </span>
+                                                                )}
+                                                                <span className="w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center shrink-0 shadow-sm" style={chipStyle(h)}>
+                                                                    {h.letter}
                                                                 </span>
+                                                                <span className="text-white text-xs sm:text-sm font-black truncate">{currentRace.options[hIdx] || h.name}</span>
+                                                            </div>
+                                                            <span className="flex items-baseline gap-1 shrink-0 ml-2">
+                                                                {pop !== null && pop <= 3 && !isRacing && <span className="text-[10px] text-rose-300">{pop}人気</span>}
+                                                                <span className={`font-mono text-xs sm:text-sm font-black ${odds.odds[hIdx] === null ? 'text-slate-600' : 'text-amber-300'}`}>
+                                                                    {formatOdds(odds.odds[hIdx])}
+                                                                </span>
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 mt-2">1位予想の票数から算出（払戻率80%）</div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* 下部：実況テロップ */}
+                                {(displayStatus === 'racing' || displayStatus === 'idle') && (
+                                    <div className="absolute bottom-3 sm:bottom-5 inset-x-3 z-20 pointer-events-none flex justify-center">
+                                        <div className="w-full max-w-2xl bg-slate-950/90 backdrop-blur border border-slate-800 px-4 py-2 rounded-xl shadow-xl flex items-center gap-2.5 text-sm">
+                                            <span className="bg-slate-800 text-amber-300 text-xs font-bold px-2 py-0.5 rounded shrink-0">実況</span>
+                                            <span ref={commentaryCallbackRef} className="text-white tracking-wide truncate font-bold" />
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 着順確定画面（画面いっぱいフルスクリーン） */}
+                                {displayStatus === 'result' && correctOrder && (
+                                    <div className="absolute inset-0 z-40 bg-slate-950/95 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6 lg:p-8 text-center overflow-y-auto">
+                                        {/* 上部ヘッダー */}
+                                        <div className="shrink-0 space-y-1 sm:space-y-2">
+                                            <div className="inline-flex items-center gap-2 px-3 sm:px-5 py-1 sm:py-1.5 rounded-full bg-amber-500/20 border border-amber-400/50 text-amber-300 font-black text-xs sm:text-sm tracking-wider shadow-lg">
+                                                <span className="text-sm sm:text-base">🏁</span>
+                                                <span>第{currentRaceIndex + 1}レース 確定</span>
+                                                <span className="text-slate-500">|</span>
+                                                <span>OFFICIAL RESULT</span>
+                                            </div>
+                                            <h1 className="text-xl sm:text-2xl lg:text-4xl font-black text-white tracking-wide drop-shadow">{currentRace.name}</h1>
+                                            <p className="text-xs sm:text-sm lg:text-base text-amber-200/90 font-bold max-w-3xl mx-auto px-2">{currentRace.question}</p>
+                                        </div>
+
+                                        {/* 中央：1着・2着・3着のカード（横並び3列） */}
+                                        <div className="my-auto py-2 sm:py-4 w-full max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-3 sm:gap-4 lg:gap-6">
+                                            {correctOrder.slice(0, 3).map((hIdx, rank) => {
+                                                const h = HORSES_DATA[hIdx];
+                                                const st = rank === 0
+                                                    ? { bg: 'bg-gradient-to-b from-amber-500/25 via-slate-900/95 to-slate-950', border: 'border-2 border-amber-400 shadow-[0_0_35px_rgba(245,158,11,0.3)]', badge: 'bg-gradient-to-r from-amber-400 to-yellow-300 text-slate-950', label: '🥇 1着 (WINNER)', accent: 'text-amber-300', scale: 'md:scale-105 z-10' }
+                                                    : rank === 1
+                                                        ? { bg: 'bg-gradient-to-b from-slate-300/15 via-slate-900/95 to-slate-950', border: 'border-2 border-slate-300/70', badge: 'bg-slate-200 text-slate-900', label: '🥈 2着', accent: 'text-slate-200', scale: '' }
+                                                        : { bg: 'bg-gradient-to-b from-amber-700/20 via-slate-900/95 to-slate-950', border: 'border-2 border-amber-600/70', badge: 'bg-amber-700 text-amber-100', label: '🥉 3着', accent: 'text-amber-400', scale: '' };
+                                                return (
+                                                    <div key={rank} className={`${st.bg} ${st.border} ${st.scale} rounded-2xl sm:rounded-3xl p-4 sm:p-6 flex flex-col justify-between items-center text-center relative overflow-hidden`}>
+                                                        <div className={`px-3 sm:px-4 py-1 rounded-full text-xs sm:text-sm font-black mb-2 shadow ${st.badge}`}>{st.label}</div>
+                                                        <div className="w-14 h-14 sm:w-16 sm:h-16 lg:w-20 lg:h-20 rounded-2xl flex items-center justify-center font-black text-2xl sm:text-3xl lg:text-4xl shadow-xl my-2 border-2 border-white/20" style={chipStyle(h)}>
+                                                            {h.letter}
+                                                        </div>
+                                                        <div className="my-1 sm:my-2 w-full">
+                                                            <div className="text-base sm:text-lg lg:text-xl font-black text-white leading-snug break-words px-1">{currentRace.options[hIdx]}</div>
+                                                        </div>
+                                                        <div className="mt-2 pt-2 border-t border-slate-800/80 w-full flex items-center justify-center gap-3 font-mono">
+                                                            <span className="text-[10px] sm:text-xs text-slate-400">単勝</span>
+                                                            <span className={`text-base sm:text-xl font-black ${st.accent}`}>{odds.odds[hIdx] === null ? '---' : `${formatOdds(odds.odds[hIdx])}倍`}</span>
+                                                            <span className="text-[10px] sm:text-xs text-slate-400">{odds.anyCounts[hIdx]}票</span>
+                                                        </div>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+
+                                        {/* 下部：的中者速報 */}
+                                        <div className="shrink-0 w-full max-w-5xl mx-auto bg-slate-900/80 border border-slate-800 rounded-2xl p-3 sm:p-4 text-left shadow-lg">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-xs sm:text-sm font-black text-amber-300">
+                                                    🎉 このレースの的中者（{hitList.length}名）
+                                                </span>
+                                                <span className="text-[11px] text-slate-400">役ごとの加算ポイントを付与しました</span>
+                                            </div>
+                                            {hitList.length === 0 ? (
+                                                <div className="text-xs text-slate-500 py-1">的中者はいませんでした。次のレースで巻き返そう！</div>
+                                            ) : (
+                                                <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
+                                                    {hitList.map(({ p, r }) => (
+                                                        <span key={p.id} className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold border ${RANK_STYLE[r.type].soft}`}>
+                                                            <span>{RANK_STYLE[r.type].emoji}</span>
+                                                            <span className="text-white">{p.name}</span>
+                                                            <span className="font-mono">+{r.score}pt（{r.name}）</span>
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* 総合表彰 */}
+                                {displayStatus === 'grand_finale' && (
+                                    <div className="absolute inset-0 z-50 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 backdrop-blur-xl flex flex-col justify-between p-4 sm:p-6 lg:p-10 text-center overflow-y-auto">
+                                        <div className="shrink-0 space-y-2">
+                                            <h1 className="text-3xl sm:text-4xl lg:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wider drop-shadow">
+                                                結果発表
+                                            </h1>
+                                            <p className="text-xs sm:text-sm text-slate-400">これまでの累計ポイント</p>
+                                        </div>
+
+                                        <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
+                                            <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6 items-end">
+                                                {([1, 0, 2] as const).map(i => {
+                                                    const u = ranked[i];
+                                                    const styles = i === 0
+                                                        ? { box: 'order-1 md:order-2 bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-amber-400 shadow-[0_0_45px_rgba(245,158,11,0.35)] md:h-[360px] md:-translate-y-4', badge: 'w-16 h-16 bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 text-2xl', name: 'text-2xl sm:text-3xl lg:text-5xl', pt: 'text-3xl sm:text-5xl text-amber-300' }
+                                                        : i === 1
+                                                            ? { box: 'order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-slate-300/80 md:h-[300px]', badge: 'w-12 h-12 bg-slate-300 text-slate-900 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-slate-200' }
+                                                            : { box: 'order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-amber-700/80 md:h-[280px]', badge: 'w-12 h-12 bg-amber-700 text-amber-100 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-amber-400' };
+                                                    return (
+                                                        <div key={i} className={`${styles.box} border-2 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative justify-between transform`}>
+                                                            {i === 0 && <div className="absolute -top-7 inset-x-0 flex justify-center"><span className="text-4xl animate-bounce drop-shadow">👑</span></div>}
+                                                            <div className={`${styles.badge} rounded-full flex items-center justify-center font-black shadow`}>{i + 1}位</div>
+                                                            <div className="my-3 text-center w-full">
+                                                                <div className={`${styles.name} font-black text-white truncate px-2`}>{u ? u.name : '―'}</div>
+                                                            </div>
+                                                            <div className="bg-slate-900/90 border border-slate-700 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
+                                                                <span className={`${styles.pt} font-black font-mono`}>{u ? u.score : 0} pt</span>
                                                             </div>
                                                         </div>
                                                     );
                                                 })}
                                             </div>
 
-                                            {/* 下部：的中者速報 ＆ 進行アクション */}
-                                            <div className="shrink-0 w-full max-w-5xl mx-auto space-y-2.5 sm:space-y-3">
-                                                {/* 的中者ボード */}
-                                                {(() => {
-                                                    const hits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) > 0);
-                                                    const perfectHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 6);
-                                                    const trifectaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 4);
-                                                    const exactaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 3);
-                                                    const quinellaHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 2);
-                                                    const singleHits = participants.filter(p => p.betSlip && calculateBetScore(p.betSlip, correctOrder) === 1);
-
-                                                    return (
-                                                        <div className="bg-slate-900/90 border border-slate-800 rounded-xl sm:rounded-2xl p-3 sm:p-4 text-left shadow-lg">
-                                                            <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pb-2 border-b border-slate-800">
-                                                                <div className="flex items-center gap-2">
-                                                                    <span className="text-base">🎯</span>
-                                                                    <span className="font-black text-xs sm:text-sm text-white">このレースの的中者速報</span>
-                                                                    <span className="text-xs text-amber-400 font-bold font-mono">({hits.length}名 的中)</span>
-                                                                </div>
-                                                                <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-[10px] sm:text-xs text-slate-300 font-bold">
-                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>サンレンタン +6pt</span>
-                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>サンレンプク +4pt</span>
-                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-blue-400"></span>ニレンタン +3pt</span>
-                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-purple-400"></span>プクプク +2pt</span>
-                                                                    <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-full bg-pink-400"></span>タン +1pt</span>
-                                                                </div>
-                                                            </div>
-
-                                                            {hits.length === 0 ? (
-                                                                <div className="text-center py-1.5 text-xs sm:text-sm text-slate-400 font-medium">
-                                                                    該当者なし！波乱のレース展開となりました⚡️
-                                                                </div>
-                                                            ) : (
-                                                                <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
-                                                                    {perfectHits.map(p => (
-                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs font-black shadow-sm">
-                                                                            <span>👑 サンレンタン!</span>
-                                                                            <span>{p.name}</span>
-                                                                            <span className="font-mono text-[10px] bg-amber-500 text-slate-950 px-1.5 py-0.5 rounded font-black">+6pt</span>
-                                                                        </span>
-                                                                    ))}
-                                                                    {trifectaHits.map(p => (
-                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-bold shadow-sm">
-                                                                            <span>✨ サンレンプク!</span>
-                                                                            <span>{p.name}</span>
-                                                                            <span className="font-mono text-[10px] bg-emerald-500 text-slate-950 px-1.5 py-0.5 rounded font-black">+4pt</span>
-                                                                        </span>
-                                                                    ))}
-                                                                    {exactaHits.map(p => (
-                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-blue-500/20 border border-blue-500/40 text-blue-300 text-xs font-bold shadow-sm">
-                                                                            <span>🎯 ニレンタン!</span>
-                                                                            <span>{p.name}</span>
-                                                                            <span className="font-mono text-[10px] bg-blue-500 text-white px-1.5 py-0.5 rounded font-black">+3pt</span>
-                                                                        </span>
-                                                                    ))}
-                                                                    {quinellaHits.map(p => (
-                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-purple-500/20 border border-purple-500/40 text-purple-300 text-xs font-bold shadow-sm">
-                                                                            <span>🍀 プクプク!</span>
-                                                                            <span>{p.name}</span>
-                                                                            <span className="font-mono text-[10px] bg-purple-500 text-white px-1.5 py-0.5 rounded font-black">+2pt</span>
-                                                                        </span>
-                                                                    ))}
-                                                                    {singleHits.map(p => (
-                                                                        <span key={p.id} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-pink-500/20 border border-pink-500/40 text-pink-300 text-xs font-bold shadow-sm">
-                                                                            <span>⚡️ タン!</span>
-                                                                            <span>{p.name}</span>
-                                                                            <span className="font-mono text-[10px] bg-pink-500 text-white px-1.5 py-0.5 rounded font-black">+1pt</span>
-                                                                        </span>
-                                                                    ))}
-                                                                </div>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })()}
-
-                                                {/* 進行ボタン（次レースへいく ＆ 表彰式へいく） */}
-                                                {isAuthority ? (
-                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                                                        <button
-                                                            onClick={goToNextRace}
-                                                            className="py-3 sm:py-3.5 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-sm sm:text-base rounded-xl sm:rounded-2xl shadow-xl transition-all transform hover:scale-[1.01]"
-                                                        >
-                                                            🏇 次レースへいく（待機へ） ➔
-                                                        </button>
-                                                        <button
-                                                            onClick={goToGrandFinale}
-                                                            className="py-3 sm:py-3.5 bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-sm sm:text-base rounded-xl sm:rounded-2xl shadow-xl transition-all transform hover:scale-[1.01]"
-                                                        >
-                                                            🏆 表彰式（結果発表）へいく ➔
-                                                        </button>
+                                            {ranked.length > 3 && (
+                                                <div className="w-full mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-left shadow-lg">
+                                                    <div className="flex flex-wrap gap-2.5 max-h-32 overflow-y-auto">
+                                                        {ranked.slice(3).map((u, i) => (
+                                                            <span key={u.id} className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-sm font-bold">
+                                                                <span className="font-mono text-slate-400">{i + 4}位</span>
+                                                                <span className="text-white">{u.name}</span>
+                                                                <span className="font-mono text-amber-400">{u.score} pt</span>
+                                                            </span>
+                                                        ))}
                                                     </div>
-                                                ) : (
-                                                    <div className="py-2 text-xs sm:text-sm text-slate-400 font-medium">
-                                                        幹事が次の進行を選択するまでお待ちください
-                                                    </div>
-                                                )}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {/* 結果発表（画面いっぱいフルスクリーン） */}
-                                    {gameStatus === 'grand_finale' && (
-                                        <div className="absolute inset-0 z-50 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 backdrop-blur-xl flex flex-col justify-between p-4 sm:p-6 lg:p-10 text-center animate-fade-in overflow-y-auto">
-                                            {/* 上部タイトル */}
-                                            <div className="shrink-0 space-y-2">
-                                                <h1 className="text-3xl sm:text-4xl lg:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wider drop-shadow">
-                                                    結果発表
-                                                </h1>
-                                            </div>
-
-                                            {/* 中央 表彰台（1位・2位・3位）：要素は順位、名前、ポイントのみ */}
-                                            <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
-                                                <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6 items-end">
-                                                    {/* 2位 - 左 */}
-                                                    {(() => {
-                                                        const runnerUp = allRankedParticipants[1];
-                                                        return (
-                                                            <div className="order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-2 border-slate-300/80 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative md:h-[300px] justify-between">
-                                                                <div className="w-12 h-12 rounded-full bg-slate-300 text-slate-900 flex items-center justify-center font-black text-xl shadow">
-                                                                    2位
-                                                                </div>
-                                                                <div className="my-3 text-center w-full">
-                                                                    <div className="text-xl sm:text-2xl lg:text-3xl font-black text-white truncate px-2">
-                                                                        {runnerUp ? runnerUp.name : '―'}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="bg-slate-900/90 border border-slate-700 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
-                                                                    <span className="text-2xl sm:text-3xl font-black font-mono text-slate-200">
-                                                                        {runnerUp ? runnerUp.score : 0} pt
-                                                                    </span>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })()}
-
-                                                    {/* 1位 - 中央 */}
-                                                    {(() => {
-                                                        const champ = allRankedParticipants[0];
-                                                        return (
-                                                            <div className="order-1 md:order-2 bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-2 border-amber-400 rounded-2xl sm:rounded-3xl p-6 sm:p-8 flex flex-col items-center shadow-[0_0_45px_rgba(245,158,11,0.35)] relative md:h-[360px] justify-between transform md:-translate-y-4">
-                                                                <div className="absolute -top-7 inset-x-0 flex justify-center">
-                                                                    <span className="text-4xl animate-bounce drop-shadow">👑</span>
-                                                                </div>
-                                                                <div className="w-16 h-16 rounded-full bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 flex items-center justify-center font-black text-2xl shadow-xl mt-2">
-                                                                    1位
-                                                                </div>
-                                                                <div className="my-3 text-center w-full">
-                                                                    <div className="text-2xl sm:text-3xl lg:text-5xl font-black text-white drop-shadow truncate px-2">
-                                                                        {champ ? champ.name : '―'}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="bg-amber-500/20 border border-amber-400/50 px-6 py-3 rounded-2xl text-center w-full shadow-inner">
-                                                                    <span className="text-3xl sm:text-5xl font-black font-mono text-amber-300">
-                                                                        {champ ? champ.score : 0} pt
-                                                                    </span>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })()}
-
-                                                    {/* 3位 - 右 */}
-                                                    {(() => {
-                                                        const third = allRankedParticipants[2];
-                                                        return (
-                                                            <div className="order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-2 border-amber-700/80 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative md:h-[280px] justify-between">
-                                                                <div className="w-12 h-12 rounded-full bg-amber-700 text-amber-100 flex items-center justify-center font-black text-xl shadow">
-                                                                    3位
-                                                                </div>
-                                                                <div className="my-3 text-center w-full">
-                                                                    <div className="text-xl sm:text-2xl lg:text-3xl font-black text-white truncate px-2">
-                                                                        {third ? third.name : '―'}
-                                                                    </div>
-                                                                </div>
-                                                                <div className="bg-slate-900/90 border border-slate-800 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
-                                                                    <span className="text-2xl sm:text-3xl font-black font-mono text-amber-400">
-                                                                        {third ? third.score : 0} pt
-                                                                    </span>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })()}
                                                 </div>
-
-                                                {/* 4位以下の全参加者一覧：順位、名前、ポイントのみ */}
-                                                {allRankedParticipants.length > 3 && (
-                                                    <div className="w-full mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-left shadow-lg">
-                                                        <div className="flex flex-wrap gap-2.5 max-h-32 overflow-y-auto">
-                                                            {allRankedParticipants.slice(3).map((u, i) => (
-                                                                <span key={u.id} className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-sm font-bold">
-                                                                    <span className="font-mono text-slate-400">{i + 4}位</span>
-                                                                    <span className="text-white">{u.name}</span>
-                                                                    <span className="font-mono text-amber-400">{u.score} pt</span>
-                                                                </span>
-                                                            ))}
-                                                        </div>
-                                                    </div>
-                                                )}
-                                            </div>
-
-                                            {/* 下部ボタン */}
-                                            <div className="shrink-0 w-full max-w-md mx-auto">
-                                                {isAuthority && (
-                                                    <button
-                                                        onClick={() => {
-                                                            setGameStatus('idle');
-                                                            statusRef.current = 'idle';
-                                                            broadcastGameState('idle', currentRaceIndex, correctOrder);
-                                                        }}
-                                                        className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-sm transition-all border border-slate-700 shadow"
-                                                    >
-                                                        待機画面へ戻る
-                                                    </button>
-                                                )}
-                                            </div>
+                                            )}
                                         </div>
-                                    )}
 
-                                </div>
-                            </div>
-                        )}
-
-                        {/* -------------------------------------------------------- */}
-                        {/* [パネル C] 幹事・管理画面 (/derby/host)                  */}
-                        {/* -------------------------------------------------------- */}
-                        {(derbyRoute === 'multiview' || derbyRoute === 'host') && (
-                            <div className={`${derbyRoute === 'host' ? 'lg:col-span-12 max-w-xl mx-auto' : 'lg:col-span-3'} flex flex-col w-full`}>
-                                {role === 'multiview' && (
-                                    <div className="flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
-                                        <span className="flex items-center gap-1.5 text-slate-200">
-                                            <Settings className="w-3.5 h-3.5 text-blue-400" /> ③ 幹事管理コンソール
-                                        </span>
-                                        <span className="text-[10px] text-slate-500 font-mono">{basePath}/host</span>
+                                        <div className="shrink-0 w-full max-w-md mx-auto">
+                                            {role === 'multiview' && hostAuthed && (
+                                                <button onClick={closeGrandFinale} disabled={hostBusy} className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-sm border border-slate-700 shadow">
+                                                    表彰を閉じる
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
+                            </div>
+                        </div>
+                    )}
 
-                                <div className="w-full bg-slate-900 rounded-2xl shadow-xl border border-slate-800 p-4 space-y-3" style={role === 'host' ? undefined : { height: 670 }}>
+                    {/* -------------------------------------------------------- */}
+                    {/* [パネル C] 幹事・管理画面                                */}
+                    {/* -------------------------------------------------------- */}
+                    {(derbyRoute === 'multiview' || derbyRoute === 'host') && (
+                        <div className={`${derbyRoute === 'host' ? 'lg:col-span-12 max-w-xl mx-auto' : 'lg:col-span-3'} flex flex-col w-full`}>
+                            {role === 'multiview' && (
+                                <div className="flex items-center justify-between px-2 py-1 mb-1 text-slate-400 text-xs font-bold">
+                                    <span className="flex items-center gap-1.5 text-slate-200">
+                                        <Settings className="w-3.5 h-3.5 text-blue-400" /> ③ 幹事管理コンソール
+                                    </span>
+                                    <span className="text-[10px] text-slate-500 font-mono">{basePath}/host</span>
+                                </div>
+                            )}
 
-                                    {/* 管理サブタブ（2タブ構成） */}
+                            {/* 幹事画面（role=host）は高さを固定せず全項目を表示。multiview だけ枠内スクロール */}
+                            <div
+                                className={`w-full bg-slate-900 rounded-2xl shadow-xl border border-slate-800 p-4 space-y-3 ${role === 'host' ? '' : 'overflow-y-auto'}`}
+                                style={role === 'host' ? undefined : { height: 670 }}
+                            >
+                                {hostPanelLocked ? (
+                                    <div className="bg-slate-950 p-4 rounded-xl border border-amber-500/40 space-y-2.5">
+                                        <div className="text-sm font-black text-white">幹事ログイン</div>
+                                        <p className="text-[11px] text-slate-400">進行操作には幹事パスワード（アンケートビンゴの司会者と同じ）が必要です。</p>
+                                        <input
+                                            type="password"
+                                            value={loginInput}
+                                            onChange={(e) => setLoginInput(e.target.value)}
+                                            onKeyDown={(e) => { if (e.key === 'Enter') void hostLogin(); }}
+                                            placeholder="パスワード"
+                                            autoComplete="current-password"
+                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-sm text-white"
+                                        />
+                                        {loginError && <p role="alert" className="text-[11px] text-rose-300">{loginError}</p>}
+                                        <button
+                                            onClick={() => void hostLogin()}
+                                            disabled={!loginInput || hostBusy}
+                                            className="w-full py-2.5 rounded-xl font-black text-xs bg-amber-500 text-slate-950 disabled:bg-slate-800 disabled:text-slate-600"
+                                        >
+                                            ログイン
+                                        </button>
+                                    </div>
+                                ) : (<>
+                                    {/* 管理サブタブ */}
                                     <div className="grid grid-cols-2 gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-center text-xs font-bold">
                                         <button onClick={() => setAdminSubTab('live')} className={`py-1.5 rounded-lg transition-all ${adminSubTab === 'live' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}>
                                             当日進行
                                         </button>
                                         <button onClick={() => setAdminSubTab('edit')} className={`py-1.5 rounded-lg transition-all ${adminSubTab === 'edit' ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}>
-                                            問題登録
+                                            問題登録{draftDirty ? '（未保存）' : ''}
                                         </button>
                                     </div>
 
                                     {adminSubTab === 'live' && (
                                         <div className="space-y-3">
-                                            {/* 各画面のURL（参加者へはQRコード化して配布） */}
-                                            {role === 'host' && (
-                                                <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1.5">
-                                                    <span className="text-[10px] text-amber-300 font-bold block">各画面のURL</span>
-                                                    {([['play', '参加者スマホ（QRで配布）'], ['screen', '会場スクリーン（プロジェクターPC）']] as const).map(([r, label]) => (
-                                                        <div key={r} className="flex items-center gap-2 text-[11px]">
-                                                            <span className="text-slate-400 shrink-0 w-28">{label}</span>
-                                                            <span className="font-mono text-slate-200 truncate flex-1">{roleUrl(r)}</span>
-                                                            <button onClick={() => copyText(roleUrl(r))} className="shrink-0 px-2 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">コピー</button>
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            )}
-
-                                            {/* 着順確定後の進行（次レースへいく ＆ 表彰式へいく） */}
-                                            {gameStatus === 'result' && (
-                                                <div className="grid grid-cols-2 gap-2">
-                                                    <button
-                                                        onClick={goToNextRace}
-                                                        className="py-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-xs rounded-xl shadow"
-                                                    >
-                                                        🏇 次レースへいく
-                                                    </button>
-                                                    <button
-                                                        onClick={goToGrandFinale}
-                                                        className="py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs rounded-xl shadow"
-                                                    >
-                                                        🏆 結果発表へいく
-                                                    </button>
-                                                </div>
-                                            )}
-                                            {gameStatus === 'grand_finale' && (
-                                                <div className="bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-bold p-2.5 rounded-xl text-center">
-                                                    🏆 会場スクリーンに総合結果発表を表示中
-                                                </div>
-                                            )}
-                                            {/* 現在のレース情報 */}
-                                            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1.5">
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-[11px] text-amber-400 font-mono font-bold">進行中レース:</span>
-                                                    <span className="text-[11px] bg-slate-800 px-2.5 py-1 rounded text-slate-200 font-mono font-bold">
-                                                        投票済: {allRankedParticipants.filter(p => p.betSlip).length} / {allRankedParticipants.length}名
+                                            {/* 進行ステータス */}
+                                            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+                                                <div className="flex items-center justify-between text-xs">
+                                                    <span className="font-bold text-slate-300">現在のステータス</span>
+                                                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold font-mono ${gameStatus === 'idle' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : gameStatus === 'racing' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse' : 'bg-blue-500/20 text-blue-300 border border-blue-500/40'}`}>
+                                                        {gameStatus === 'idle' ? '投票受付中' : gameStatus === 'racing' ? '出走中' : gameStatus === 'result' ? '結果確定' : '総合表彰'}
                                                     </span>
                                                 </div>
-                                                <select
-                                                    value={currentRaceIndex}
-                                                    onChange={(e) => goToRace(parseInt(e.target.value, 10), true)}
-                                                    disabled={gameStatus === 'racing'}
-                                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white"
-                                                >
-                                                    {races.map((r, i) => (
-                                                        <option key={r.id} value={i}>{r.name}</option>
-                                                    ))}
-                                                </select>
-                                                <div className="text-[11px] text-slate-300 font-bold">{currentRace.question}</div>
-                                            </div>
 
-                                            {/* 正解着順指定（自動スワップ対応） */}
-                                            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-2">
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-[10px] text-amber-300 font-bold block">このレースの正解着順（1〜3着）:</span>
-                                                    <span className="text-[9px] text-slate-400">重複時は自動で入れ替わります</span>
+                                                {/* 出走中の残り秒数 */}
+                                                {gameStatus === 'racing' && raceStartedAt !== null && raceDurationMs !== null && (
+                                                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2 text-center">
+                                                        <div className="text-[10px] text-amber-300">着順確定まで</div>
+                                                        <div className="text-xl font-black text-amber-400 font-mono">
+                                                            {Math.max(0, Math.ceil((raceStartedAt + raceDurationMs - serverNow()) / 1000))} 秒
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-900">
+                                                    <span>投票数</span>
+                                                    <span className="text-white font-mono font-bold">{participants.filter(p => p.betSlip).length} / {participants.length} 人</span>
                                                 </div>
-                                                {[0, 1, 2].map(rank => (
-                                                    <div key={rank} className="flex items-center gap-2 text-xs">
-                                                        <span className="w-10 bg-slate-800 text-amber-400 font-mono py-1 rounded text-center text-[10px] font-bold">
-                                                             {rank + 1}着
-                                                        </span>
-                                                        <select
-                                                            value={correctOrder[rank]}
-                                                            onChange={(e) => updateCorrectOrder(rank, parseInt(e.target.value, 10))}
-                                                            disabled={gameStatus === 'racing'}
-                                                            className="flex-1 bg-slate-900 border border-slate-700 rounded p-1 text-xs text-white"
-                                                        >
-                                                            {HORSES_DATA.map((h, i) => {
-                                                                const otherRank = correctOrder.findIndex((c, rIdx) => rIdx !== rank && c === i);
-                                                                return (
-                                                                    <option key={i} value={i}>
-                                                                        [{h.letter}] {currentRace.options[i]} {otherRank !== -1 ? `(現在${otherRank + 1}着と入替)` : ''}
-                                                                    </option>
-                                                                );
-                                                            })}
-                                                        </select>
-                                                    </div>
-                                                ))}
                                             </div>
 
-                                            {/* 発走ボタン */}
-                                            <button
-                                                onClick={startDerbyRace}
-                                                disabled={gameStatus !== 'idle'}
-                                                className="w-full bg-red-600 hover:bg-red-500 disabled:bg-slate-800 text-white font-black py-3 rounded-xl text-xs shadow flex items-center justify-center gap-1.5 transition-all"
-                                            >
-                                                <Play className="w-4 h-4 fill-white" />
-                                                <span>{gameStatus === 'racing' ? '🏇 激走中継中...' : gameStatus === 'idle' ? `第${currentRaceIndex + 1}R 3D競馬発走スタート！` : '発走済み（次のレースへ進んでください）'}</span>
-                                            </button>
+                                            {/* 主な操作ボタン */}
+                                            <div className="space-y-2">
+                                                {gameStatus === 'idle' && (
+                                                    <button
+                                                        onClick={startRace}
+                                                        disabled={hostBusy}
+                                                        className="w-full py-3 rounded-xl font-black text-sm bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2"
+                                                    >
+                                                        <Play className="w-4 h-4 fill-current" />
+                                                        <span>第{currentRaceIndex + 1}レース 発走！</span>
+                                                    </button>
+                                                )}
 
-                                            {/* 再投票 ＆ リセットボタン群 */}
-                                            <div className="grid grid-cols-2 gap-2">
-                                                <button
-                                                    onClick={rebetCurrentRace}
-                                                    className="bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-2 rounded-xl text-xs border border-slate-700"
-                                                >
-                                                    このRを再投票
-                                                </button>
-                                                <button
-                                                    onClick={() => {
-                                                        setConfirmDialog({
-                                                            isOpen: true,
-                                                            title: '全スコアリセットの確認',
-                                                            message: '全レースの得点と投票履歴を初期状態に戻します。本当によろしいですか？',
-                                                            onConfirm: () => {
-                                                                resetEntireTournament();
-                                                                setConfirmDialog(CLOSED_DIALOG);
-                                                            }
-                                                        });
-                                                    }}
-                                                    className="bg-slate-900 hover:bg-rose-950/40 text-rose-400 font-bold py-2 rounded-xl text-xs border border-slate-800"
-                                                >
-                                                    全スコアリセット
-                                                </button>
+                                                {gameStatus === 'result' && (
+                                                    <button
+                                                        onClick={nextRace}
+                                                        disabled={hostBusy}
+                                                        className="w-full py-3 rounded-xl font-black text-sm bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 shadow-lg flex items-center justify-center gap-2"
+                                                    >
+                                                        <span>{currentRaceIndex + 1 < races.length ? `第${currentRaceIndex + 2}レースの受付を開始` : '総合結果の表彰へ！'}</span>
+                                                    </button>
+                                                )}
+
+                                                {gameStatus === 'grand_finale' && (
+                                                    <button
+                                                        onClick={closeGrandFinale}
+                                                        disabled={hostBusy}
+                                                        className="w-full py-2.5 rounded-xl font-bold text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                                                    >
+                                                        表彰を閉じる
+                                                    </button>
+                                                )}
                                             </div>
 
-                                            {/* 累計ランキング */}
-                                            <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-800 space-y-1">
-                                                <span className="text-[10px] text-slate-400 font-bold block">累計得点リーダーボード:</span>
-                                                {allRankedParticipants.slice(0, 5).map((u, i) => (
-                                                    <div key={u.id} className="flex items-center justify-between text-xs p-1 bg-slate-900 rounded">
-                                                        <span className="truncate max-w-[120px] font-bold text-white">{i + 1}. {u.name}</span>
-                                                        <span className="text-amber-400 font-mono font-bold">{u.score} pt</span>
+                                            {/* 正解着順の確認・クイック変更 */}
+                                            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+                                                <div className="flex items-center justify-between text-xs">
+                                                    <span className="font-bold text-slate-300">正解着順（幹事のみ表示）</span>
+                                                    {gameStatus === 'idle' && <span className="text-[10px] text-amber-400">発走前に変更可</span>}
+                                                </div>
+                                                <div className="grid grid-cols-3 gap-1.5 font-mono">
+                                                    {[0, 1, 2].map(rank => {
+                                                        const cur = correctOrder ? correctOrder[rank] : null;
+                                                        return (
+                                                            <div key={rank} className="bg-slate-900 border border-slate-800 rounded-lg p-1.5 text-center">
+                                                                <div className="text-[10px] text-slate-400">{rank + 1}着</div>
+                                                                <select
+                                                                    disabled={gameStatus === 'racing' || hostBusy}
+                                                                    value={cur ?? ''}
+                                                                    onChange={(e) => {
+                                                                        const val = Number(e.target.value);
+                                                                        const next: BetOrder = correctOrder ? [...correctOrder] : [0, 1, 2];
+                                                                        next[rank] = val;
+                                                                        void runHost('set_correct_order', { order: next });
+                                                                    }}
+                                                                    className="w-full bg-slate-950 border border-slate-700 rounded text-xs font-bold text-amber-300 p-1 mt-1"
+                                                                >
+                                                                    {HORSES_DATA.map((h, i) => (
+                                                                        <option key={i} value={i}>
+                                                                            {h.letter}: {currentRace.options[i]?.slice(0, 8) || h.name}
+                                                                        </option>
+                                                                    ))}
+                                                                </select>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+
+                                            {/* レース移動・微調整 */}
+                                            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+                                                <div className="text-xs font-bold text-slate-300">レース切り替え</div>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <button
+                                                        onClick={prevRace}
+                                                        disabled={currentRaceIndex <= 0 || hostBusy}
+                                                        className="py-2 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 disabled:opacity-40"
+                                                    >
+                                                        ← 前のレース
+                                                    </button>
+                                                    <button
+                                                        onClick={nextRace}
+                                                        disabled={hostBusy}
+                                                        className="py-2 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 disabled:opacity-40"
+                                                    >
+                                                        次のレース →
+                                                    </button>
+                                                </div>
+                                                {gameStatus !== 'idle' && (
+                                                    <button
+                                                        onClick={resetCurrentRace}
+                                                        disabled={hostBusy}
+                                                        className="w-full py-1.5 rounded-lg text-[11px] font-bold text-amber-300 hover:text-amber-200 border border-amber-500/30"
+                                                    >
+                                                        第{currentRaceIndex + 1}レースを受付中に戻す
+                                                    </button>
+                                                )}
+                                            </div>
+
+                                            {/* URL 共有 */}
+                                            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+                                                <div className="text-xs font-bold text-slate-300">各画面のURL</div>
+                                                <div className="space-y-1.5 text-xs">
+                                                    <div className="flex items-center justify-between bg-slate-900 p-2 rounded-lg">
+                                                        <span className="text-slate-400">参加者スマホ</span>
+                                                        <button onClick={() => copyText(roleUrl('play'))} className="text-amber-400 font-bold hover:underline">
+                                                            URLコピー
+                                                        </button>
                                                     </div>
-                                                ))}
+                                                    <div className="flex items-center justify-between bg-slate-900 p-2 rounded-lg">
+                                                        <span className="text-slate-400">会場スクリーン</span>
+                                                        <button onClick={() => copyText(roleUrl('screen'))} className="text-amber-400 font-bold hover:underline">
+                                                            URLコピー
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* 危険ゾーン */}
+                                            <div className="pt-2">
+                                                <button
+                                                    onClick={resetAllGame}
+                                                    disabled={hostBusy}
+                                                    className="w-full py-2 rounded-xl text-[11px] font-bold text-rose-300 hover:text-rose-200 border border-rose-800/60 bg-rose-950/30"
+                                                >
+                                                    テストデータを全リセット
+                                                </button>
                                             </div>
                                         </div>
                                     )}
 
                                     {adminSubTab === 'edit' && (
-                                        <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 space-y-2 text-xs">
-                                            <div className="flex items-center justify-between gap-1 mb-1">
-                                                <span className="text-xs font-bold text-white block">レース設定（全{races.length}R）</span>
-                                                <div className="flex gap-1.5">
+                                        <div className="space-y-3">
+                                            {/* レース一覧 */}
+                                            <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                                                {(draftRaces ?? races).map((_, i) => (
                                                     <button
-                                                        onClick={addNewRace}
-                                                        className="px-2 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold text-[10px] shadow"
+                                                        key={i}
+                                                        onClick={() => setEditRaceIndex(i)}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-black shrink-0 ${editRaceIndex === i ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-300'}`}
                                                     >
-                                                        ＋ 新規レース追加
+                                                        第{i + 1}R
                                                     </button>
-                                                    {races.length > 1 && (
-                                                        <button
-                                                            onClick={deleteCurrentRace}
-                                                            className="px-2 py-1 bg-rose-700 hover:bg-rose-600 text-white rounded font-bold text-[10px] shadow"
-                                                        >
-                                                            このR削除
+                                                ))}
+                                                <button
+                                                    onClick={addDraftRace}
+                                                    className="px-2.5 py-1.5 rounded-lg text-xs font-black bg-slate-800 border border-slate-700 text-amber-400 hover:text-white shrink-0"
+                                                >
+                                                    + 追加
+                                                </button>
+                                            </div>
+
+                                            {/* 編集フォーム */}
+                                            <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2.5">
+                                                <div className="flex items-center justify-between">
+                                                    <span className="text-xs font-bold text-slate-300">第{editRaceIndex + 1}レースの設定</span>
+                                                    {(draftRaces ?? races).length > 1 && (
+                                                        <button onClick={deleteDraftRace} className="text-[11px] text-rose-400 hover:underline">
+                                                            このレースを削除
                                                         </button>
                                                     )}
                                                 </div>
+
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] text-slate-400">レース名</label>
+                                                    <input
+                                                        type="text"
+                                                        value={activeEditRace.name}
+                                                        onChange={(e) => updateDraftRace({ name: e.target.value })}
+                                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white"
+                                                    />
+                                                </div>
+
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] text-slate-400">問題文（お題）</label>
+                                                    <textarea
+                                                        rows={2}
+                                                        value={activeEditRace.question}
+                                                        onChange={(e) => updateDraftRace({ question: e.target.value })}
+                                                        className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white"
+                                                    />
+                                                </div>
+
+                                                <div className="space-y-1.5">
+                                                    <label className="text-[10px] text-slate-400">選択肢（出走馬 A〜H）</label>
+                                                    {HORSES_DATA.map((h, i) => (
+                                                        <div key={i} className="flex items-center gap-2">
+                                                            <span className="w-5 h-5 rounded text-xs font-black flex items-center justify-center font-mono shrink-0 shadow" style={chipStyle(h)}>
+                                                                {h.letter}
+                                                            </span>
+                                                            <input
+                                                                type="text"
+                                                                value={activeEditRace.options[i] ?? ''}
+                                                                onChange={(e) => {
+                                                                    const next = [...activeEditRace.options];
+                                                                    next[i] = e.target.value;
+                                                                    updateDraftRace({ options: next });
+                                                                }}
+                                                                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-1.5 text-xs text-white"
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
                                             </div>
-                                            <select
-                                                value={currentRaceIndex}
-                                                onChange={(e) => goToRace(parseInt(e.target.value, 10), true)}
-                                                disabled={gameStatus === 'racing'}
-                                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-1.5 text-xs text-amber-300 font-bold mb-2"
-                                            >
-                                                {races.map((r, i) => (
-                                                    <option key={r.id} value={i}>{r.name}</option>
-                                                ))}
-                                            </select>
-                                            <input
-                                                type="text"
-                                                value={currentRace.name}
-                                                onChange={(e) => updateRaceField('name', e.target.value)}
-                                                className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-white"
-                                                placeholder="レース名"
-                                            />
-                                            <textarea
-                                                rows={2}
-                                                value={currentRace.question}
-                                                onChange={(e) => updateRaceField('question', e.target.value)}
-                                                className="w-full bg-slate-900 border border-slate-700 rounded p-1.5 text-xs text-white"
-                                                placeholder="質問文"
-                                            />
-                                            <div className="space-y-1.5">
-                                                {HORSES_DATA.map((h, i) => (
-                                                    <div key={i} className="flex items-center gap-2">
-                                                        <span className="w-5 h-5 rounded text-[10px] font-black flex items-center justify-center text-white shrink-0" style={{ backgroundColor: h.color }}>{h.letter}</span>
-                                                        <input
-                                                            type="text"
-                                                            value={currentRace.options[i] || ''}
-                                                            onChange={(e) => updateRaceOption(i, e.target.value)}
-                                                            className="flex-1 bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs sm:text-sm text-white"
-                                                            placeholder={`選択肢 ${h.letter}`}
-                                                        />
-                                                    </div>
-                                                ))}
-                                            </div>
-                                            <button
-                                                onClick={async () => {
-                                                    try {
-                                                        localStorage.setItem('derby_saved_races', JSON.stringify(races));
-                                                        await fetch('/api/trifecta', {
-                                                            method: 'POST',
-                                                            headers: { 'Content-Type': 'application/json' },
-                                                            body: JSON.stringify({ type: 'save_races', races })
-                                                        });
-                                                        sendEvent('refresh-data', {});
-                                                        setToastMessage('全レースの問題設定をDBに保存しました');
-                                                    } catch (e) {
-                                                        console.warn(e);
-                                                        setToastMessage('保存に失敗しました');
-                                                    }
-                                                }}
-                                                className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs"
-                                            >
-                                                編集内容を保存
-                                            </button>
+
+                                            {/* 保存・破棄ボタン */}
+                                            {draftDirty && (
+                                                <div className="grid grid-cols-2 gap-2 pt-1 sticky bottom-0 bg-slate-900/90 backdrop-blur p-2 rounded-xl border border-amber-500/30">
+                                                    <button
+                                                        onClick={discardDraft}
+                                                        className="py-2 rounded-lg text-xs font-bold bg-slate-800 text-slate-300"
+                                                    >
+                                                        変更を破棄
+                                                    </button>
+                                                    <button
+                                                        onClick={() => void saveRaces()}
+                                                        disabled={hostBusy}
+                                                        className="py-2 rounded-lg text-xs font-black bg-amber-500 text-slate-950 shadow"
+                                                    >
+                                                        編集内容を保存
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
-
-                                </div>
+                                </>)}
                             </div>
-                        )}
+                        </div>
+                    )}
 
-                    </div>
-                </main>
+                </div>
+            </main>
+
+            {/* トースト表示 */}
+            {toastMessage && (
+                <div role="status" className="fixed bottom-4 right-4 z-[90] bg-slate-900/95 border border-amber-400/60 text-amber-200 text-xs font-bold px-4 py-2.5 rounded-xl shadow-2xl animate-fade-in flex items-center gap-2">
+                    <span>✨</span>
+                    <span>{toastMessage}</span>
+                </div>
             )}
 
-            {/* 誤操作防止確認ダイアログ */}
+            {/* 確認モーダル */}
             {confirmDialog.isOpen && (
-                <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+                <div role="dialog" aria-modal="true" className="fixed inset-0 z-[100] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
                     <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-sm w-full p-5 space-y-4 shadow-2xl">
-                        <div className="flex items-center gap-2 text-rose-400 font-bold text-sm">
-                            <AlertTriangle className="w-4 h-4" />
-                            <span>{confirmDialog.title}</span>
+                        <div className="flex items-center gap-2">
+                            {confirmDialog.danger ? <AlertTriangle className="w-5 h-5 text-rose-400" /> : <span className="text-xl">🏇</span>}
+                            <h4 className="text-sm font-black text-white">{confirmDialog.title}</h4>
                         </div>
-                        <p className="text-xs text-slate-300 leading-relaxed">
-                            {confirmDialog.message}
-                        </p>
-                        <div className="flex gap-2 justify-end pt-2">
+                        <p className="text-xs text-slate-300 leading-relaxed">{confirmDialog.message}</p>
+                        <div className="grid grid-cols-2 gap-2 pt-2">
                             <button
-                                onClick={() => setConfirmDialog(CLOSED_DIALOG)}
-                                className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:bg-slate-700 text-xs font-bold"
+                                onClick={closeConfirm}
+                                className="py-2.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-300 hover:bg-slate-700"
                             >
                                 キャンセル
                             </button>
                             <button
-                                onClick={() => confirmDialog.onConfirm?.()}
-                                className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold"
+                                onClick={() => { confirmDialog.onConfirm?.(); }}
+                                className={`py-2.5 rounded-xl text-xs font-black ${confirmDialog.danger ? 'bg-rose-600 hover:bg-rose-500 text-white' : 'bg-amber-500 hover:bg-amber-400 text-slate-950'}`}
                             >
-                                実行する
+                                {confirmDialog.confirmLabel || 'OK'}
                             </button>
                         </div>
                     </div>
-                </div>
-            )}
-
-            {/* トースト通知（alert() の代替） */}
-            {toastMessage && (
-                <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[60] bg-slate-900 border border-amber-500/40 text-amber-200 text-xs font-bold px-4 py-2 rounded-xl shadow-2xl">
-                    {toastMessage}
                 </div>
             )}
 
