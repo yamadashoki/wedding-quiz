@@ -89,7 +89,6 @@ const AlertTriangle = (p: IconProps) => (
 // 型定義（strict TypeScript で next build を通すため）
 // ==============================================================
 type GameStatus = 'idle' | 'racing' | 'result' | 'grand_finale';
-type CameraMode = 'follow' | 'side' | 'front' | 'top';
 type DerbyRoute = 'multiview' | 'play' | 'screen' | 'host';
 type AdminSubTab = 'live' | 'edit';
 type BetOrder = number[]; // [1着Idx, 2着Idx, 3着Idx]
@@ -150,6 +149,8 @@ interface GameStatePayload {
     // 幹事画面（正の情報源）からのみ付与：問題データと全参加者の得点表
     races?: DerbyRace[];
     leaderboard?: Participant[];
+    // 発走ごとに幹事が発行する一意ID（同じ発走の重複受信でレースを巻き戻さないため）
+    runId?: string;
 }
 
 interface JoinPayload {
@@ -748,8 +749,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     const [correctOrder, setCorrectOrder] = useState<BetOrder>([6, 4, 0]);
     const [isMuted, setIsMuted] = useState(role === 'host' || role === 'play'); // 音は会場スクリーンから出す
 
-    // カメラ（残り距離・実況は React State にせず ref で DOM 直接更新する）
-    const [cameraMode, setCameraMode] = useState<CameraMode>('top');
+    // カメラは右斜め前の俯瞰で固定（残り距離・実況は React State にせず ref で DOM 直接更新する）
     // レース中のリアルタイム順位（並び替え演出用）
     const [realtimeRanks, setRealtimeRanks] = useState<number[]>([0, 1, 2, 3, 4, 5, 6, 7]);
 
@@ -800,6 +800,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     // レース終了ガード（バグ④対策：完了処理は1レース1回だけ、確定レースの再走を完全防止）
     const hasFinishedRef = useRef(false);
     const finishedRacesRef = useRef<Set<number>>(new Set());
+    // 発走/リセットのたびに +1。アニメーションループはこの値が変わった時だけレース状態を初期化する
+    const raceRunRef = useRef(0);
+    // 幹事：現在の発走ID / 受信側：最後に受け付けた発走ID
+    const runIdRef = useRef('');
+    const lastRunIdRef = useRef('');
 
     // Three.js 系 Ref（コンポーネント生存中は1つの renderer / WebGL コンテキストを使い回す）
     const containerElRef = useRef<HTMLDivElement | null>(null);
@@ -821,7 +826,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     // アニメーションループ / コールバック内から最新値を読むための Ref（バグ③対策）
     const statusRef = useRef<GameStatus>(gameStatus);
     const correctOrderRef = useRef<BetOrder>(correctOrder);
-    const cameraModeRef = useRef<CameraMode>(cameraMode);
     const raceIndexRef = useRef(currentRaceIndex);
     const issuedBetSlipRef = useRef<BetOrder | null>(issuedBetSlip);
     const participantIdRef = useRef(participantId);
@@ -832,7 +836,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
     statusRef.current = gameStatus;
     correctOrderRef.current = correctOrder;
-    cameraModeRef.current = cameraMode;
     raceIndexRef.current = currentRaceIndex;
     issuedBetSlipRef.current = issuedBetSlip;
     participantIdRef.current = participantId;
@@ -880,6 +883,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                         // 確定済みなので racing への巻き戻しを完全に無視
                     } else if (game.status === 'racing' && statusRef.current !== 'racing') {
                         // 管理者が新たに発走させた場合のみスタート
+                        lastRunIdRef.current = `db:${game.currentRaceIndex}`;
                         resetHorsePositionsRef.current();
                         setGameStatus('racing');
                         statusRef.current = 'racing';
@@ -1019,10 +1023,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     // --------------------------------------------------------------
     const resetHorsePositions = useCallback(() => {
         hasFinishedRef.current = false;
+        raceRunRef.current += 1;
         horseMeshesRef.current.forEach((h, i) => {
             // 奇数番と偶数番で前後をずらし、バッジが重ならず綺麗に見えるようにする
             h.progressZ = RACE_START_Z - ((i % 2) * 2.0) - (i * 0.4);
-            h.currentSpeed = 1.0;
+            h.currentSpeed = 0; // 静止状態から滑らかに加速してスタート
             h.currentLaneX = h.baseLaneX;
             h.targetLaneX = h.baseLaneX;
             h.finished = false;
@@ -1042,7 +1047,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 currentRaceIndex: rIdx,
                 correctOrder: cOrder,
                 races: racesRef.current,
-                leaderboard: participantsRef.current
+                leaderboard: participantsRef.current,
+                runId: runIdRef.current
             };
             void channelRef.current.send({ type: 'broadcast', event: 'game-state-change', payload });
         }
@@ -1155,7 +1161,26 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             setParticipants(prev => prev.map(p => ({ ...p, betSlip: null })));
         }
 
-        if (payload.status === 'racing') {
+        if (payload.status === 'racing' && payload.runId) {
+            const rid = payload.runId;
+            if (rid === lastRunIdRef.current) {
+                // 同じ発走の重複受信（定期再配信など）：何もしない＝絶対に巻き戻さない
+                return;
+            }
+            const dbStartedSameRace = lastRunIdRef.current === `db:${payload.currentRaceIndex}`;
+            lastRunIdRef.current = rid;
+            if (dbStartedSameRace || (prevStatus === 'racing' && payload.currentRaceIndex === prevRace)) {
+                // DBポーリング経由で既に同じレースを走らせている：IDだけ引き継いで継続
+                return;
+            }
+            // 新しい発走：スタート位置から1回だけ走らせる
+            finishedRacesRef.current.delete(payload.currentRaceIndex);
+            hasFinishedRef.current = false;
+            resetHorsePositionsRef.current();
+            soundRef.current?.playFanfare();
+            statusRef.current = 'racing';
+            setGameStatus('racing');
+        } else if (payload.status === 'racing') {
             const isThisRaceFinished = finishedRacesRef.current.has(payload.currentRaceIndex) ||
                 (payload.currentRaceIndex === raceIndexRef.current && (hasFinishedRef.current || statusRef.current === 'result'));
             if (isThisRaceFinished) {
@@ -1182,6 +1207,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                 finalizeRaceRef.current('remote');
             }
         } else if (payload.status === 'idle') {
+            if (lastRunIdRef.current.startsWith('db:')) lastRunIdRef.current = '';
             if (prevStatus !== 'idle') {
                 resetHorsePositionsRef.current();
                 if (payload.currentRaceIndex === prevRace) {
@@ -1455,221 +1481,249 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         attachRendererToContainer();
 
         // ---------------- アニメーションループ ----------------
-        // THREE.Clock は新しい three で非推奨のため performance.now() で自前計測
+        // ・物理は実時間の可変ステップ（最大1/60秒刻み）で毎フレーム積分 → どのリフレッシュレートでもカクつかない
+        // ・脚の回転/上下動は馬ごとの位相を積算（速度変化で位相が飛ばない）
+        // ・最終直線は「着順どおりのゴール到達時刻」から逆算した滑らかな曲線（エルミート補間）で走らせ、
+        //   速度の連続性を保ったまま幹事指定の着順で必ずゴールさせる
+        // ・カメラは右斜め前の俯瞰で角度・距離を完全固定し、馬群に合わせてコース方向へ平行移動するだけ
+        const SPEED_SCALE = 34; // 基準速度 m/s（スピード感あふれる速さ）
+        const MAX_STEP = 1 / 60;
+        const FINAL_PHASE_TRIGGER = 320; // 先頭が残りこの距離に来たら最終直線プランへ移行
+        const STOP_Z = FINISH_Z - 380; // ゴール後に流して止まる限界位置（芝生の端より手前）
+        interface FinalPlan { t0: number; T: number; startZ: number; dist: number; m0: number; m1: number; }
+        // 0→1 を結ぶ3次エルミート曲線（m0/m1 は始点・終点の速度比。m0,m1∈[0,2.2] で単調増加＝後退しない）
+        const hermite = (u: number, m0: number, m1: number) => {
+            const u2 = u * u;
+            const u3 = u2 * u;
+            return (u3 - 2 * u2 + u) * m0 + (-2 * u3 + 3 * u2) + (u3 - u2) * m1;
+        };
+        const hermiteD = (u: number, m0: number, m1: number) =>
+            (3 * u * u - 4 * u + 1) * m0 + (-6 * u * u + 6 * u) + (3 * u * u - 2 * u) * m1;
+        const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
         let lastTime = performance.now();
-        let elapsed = 0;
-        let simAccumulator = 0;
-        const SIM_STEP = 1 / 60;
-        const camTarget = new THREE.Vector3();
+        let raceTime = 0;
+        let runSeen = -1;
+        let runActive = false;
+        let finalPhaseStarted = false;
+        let plans: (FinalPlan | null)[] = meshes.map(() => null);
+        const gait: number[] = meshes.map((_, i) => i * 0.7);
+        let seed = Math.random() * 1000;
+        let focusZ = RACE_START_Z;
+        let focusInitialized = false;
         const badgeWorldPos = new THREE.Vector3();
         let gallopTimer = 0;
         let rankUpdateTimer = 0;
         let finishCooldown = -1;
         let frameId = 0;
 
+        // 固定カメラ（右斜め前の俯瞰）。角度・距離は一切変えず Z 方向へ平行移動のみ
+        const CAM_X = 12;
+        const CAM_Y = 30;
+        const CAM_OFFSET_Z = -36;
+        const LOOK_X = -6;
+        const LOOK_OFFSET_Z = 6;
+        const placeCamera = (z: number) => {
+            camera.position.set(CAM_X, CAM_Y, z + CAM_OFFSET_Z);
+            camera.lookAt(LOOK_X, 0, z + LOOK_OFFSET_Z);
+        };
+        placeCamera(RACE_START_Z);
+
+        // 道中（最終直線プラン前）の目標速度：レースごとに異なる4種類のシナリオで激しく順位が入れ替わる
+        const preFinalTargetSpeed = (h: HorseObject, idx: number, remain: number, order: BetOrder, scenario: number) => {
+            const [w, s, t] = order;
+            const wave1 = Math.sin(raceTime * 2.3 + idx * 1.85 + seed);
+            const wave2 = Math.cos(raceTime * 1.45 + idx * 2.9 + seed * 0.5);
+            const jitter = wave1 * 0.16 + wave2 * 0.08;
+            if (remain > 650) {
+                // 序盤：全馬が激しく競り合い、順位が目まぐるしくシャッフル
+                if (scenario === 3 && idx === w) return 1.18 + jitter; // 逃げパターン
+                return clamp(1.05 + jitter, 0.88, 1.25);
+            }
+            // 中盤：後続集団が押し寄せ、全頭が固まってのデッドヒート
+            const base = 1.08 + jitter;
+            if (scenario === 0) {
+                if (idx === w) { h.targetLaneX = 14; return 1.2; }
+                if (idx === s) return 1.15 + jitter;
+            } else if (scenario === 1) {
+                if (idx === w) { h.targetLaneX = -18; return 1.18; }
+                if (idx === s) return 1.16 + jitter;
+            } else if (scenario === 2) {
+                if (idx === w) { h.targetLaneX = 3.5; return 1.22 + Math.sin(raceTime * 3) * 0.06; }
+                if (idx === s) { h.targetLaneX = -3.5; return 1.22 - Math.sin(raceTime * 3) * 0.06; }
+            } else {
+                if (idx === w) return 1.16 + Math.sin(raceTime * 2) * 0.05;
+                if (idx === s || idx === t) return 1.18 + jitter;
+            }
+            return base;
+        };
+
+        // 最終直線プラン：各馬のゴール到達時刻を着順どおりに決め、現在速度から滑らかにつなぐ
+        const startFinalPhase = (order: BetOrder, scenario: number) => {
+            const remains = meshes.map(h => Math.max(0.5, h.progressZ - FINISH_Z));
+            const leadRemain = Math.min(...remains);
+            const profiles = [
+                { avg: 1.5, gap2: 0.3, gap3: 0.28, endW: 1.45 },  // 大外一気
+                { avg: 1.48, gap2: 0.26, gap3: 0.3, endW: 1.4 },  // イン強襲
+                { avg: 1.42, gap2: 0.07, gap3: 0.42, endW: 1.2 }, // 一騎打ち（ハナ差）
+                { avg: 1.36, gap2: 0.12, gap3: 0.1, endW: 1.0 },  // 逃げ粘り
+            ];
+            const p = profiles[scenario] || profiles[0];
+            const vary = (k: number) => 0.5 + 0.5 * Math.sin(seed * 0.37 + k * 1.913);
+
+            // 正解着順（重複・範囲外があっても安全に処理）
+            const top: number[] = [];
+            order.forEach(i => {
+                if (Number.isInteger(i) && i >= 0 && i < meshes.length && !top.includes(i)) top.push(i);
+            });
+
+            const winner = top.length > 0 ? top[0] : 0;
+            let tw = remains[winner] / (SPEED_SCALE * p.avg);
+            tw = Math.max(tw, leadRemain / (SPEED_SCALE * 1.35), remains[winner] / (SPEED_SCALE * 1.9));
+
+            const gaps = [0, p.gap2 * (0.8 + 0.4 * vary(1)), p.gap3 * (0.8 + 0.4 * vary(2))];
+            const endFactors = [p.endW, 1.1, 1.0];
+            const arrival = new Array<number>(meshes.length).fill(0);
+            const endFactor = new Array<number>(meshes.length).fill(0.8);
+            let tCursor = tw;
+            top.forEach((idx, k) => {
+                tCursor += gaps[k] || 0.25;
+                arrival[idx] = tCursor;
+                endFactor[idx] = endFactors[k] ?? 1.0;
+            });
+            // 4着以下は現在の並びを保って順にゴール
+            const others = meshes.map((_, i) => i).filter(i => !top.includes(i)).sort((a, b) => remains[a] - remains[b]);
+            tCursor += 0.3;
+            others.forEach((idx, k) => {
+                tCursor += 0.15 + 0.15 * vary(k + 3);
+                arrival[idx] = tCursor;
+            });
+
+            meshes.forEach((h, i) => {
+                if (h.finished) { plans[i] = null; return; }
+                const T = Math.max(0.5, arrival[i]);
+                const dist = remains[i];
+                const avgV = dist / T;
+                const m0 = clamp((h.currentSpeed * SPEED_SCALE) / avgV, 0.2, 2.2);
+                const m1 = clamp(endFactor[i], 0.2, 2.0);
+                plans[i] = { t0: raceTime, T, startZ: h.progressZ, dist, m0, m1 };
+            });
+
+            // 最終直線のコース取り（シナリオ別）
+            const laneSets: number[][] = [[14, -4, 4], [-18, 6, -2], [3.5, -3.5, 9], [0, -4.5, 4.5]];
+            const lanes = laneSets[scenario] || laneSets[0];
+            top.forEach((idx, k) => { meshes[idx].targetLaneX = lanes[k]; });
+        };
+
+        const stepRace = (dt: number, order: BetOrder, scenario: number, isRacing: boolean) => {
+            raceTime += dt;
+            if (isRacing && !finalPhaseStarted) {
+                const leadRemain = Math.min(...meshes.map(h => h.progressZ - FINISH_Z));
+                if (leadRemain <= FINAL_PHASE_TRIGGER) {
+                    finalPhaseStarted = true;
+                    startFinalPhase(order, scenario);
+                }
+            }
+            meshes.forEach((h, idx) => {
+                h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 2.2);
+
+                // ゴール後 / レース外：徐々に減速して流し、自然に止まる
+                if (h.finished || (!isRacing && !plans[idx])) {
+                    h.currentSpeed = Math.max(0, h.currentSpeed - dt * 0.4);
+                    h.progressZ = Math.max(STOP_Z, h.progressZ - h.currentSpeed * SPEED_SCALE * dt);
+                    return;
+                }
+
+                const plan = plans[idx];
+                if (plan) {
+                    const u = (raceTime - plan.t0) / plan.T;
+                    if (u >= 1) {
+                        h.progressZ = FINISH_Z;
+                        h.currentSpeed = (plan.dist / plan.T) * plan.m1 / SPEED_SCALE;
+                        h.finished = true;
+                    } else {
+                        h.progressZ = plan.startZ - plan.dist * hermite(u, plan.m0, plan.m1);
+                        h.currentSpeed = Math.max(0.05, (plan.dist / plan.T) * hermiteD(u, plan.m0, plan.m1) / SPEED_SCALE);
+                    }
+                    return;
+                }
+
+                // 道中：目標速度へ滑らかに加減速（急なワープ・カクつきを防ぐ）
+                const target = preFinalTargetSpeed(h, idx, h.progressZ - FINISH_Z, order, scenario);
+                h.currentSpeed += (target - h.currentSpeed) * Math.min(1, dt * 2.0);
+                h.progressZ -= h.currentSpeed * SPEED_SCALE * dt;
+                if (h.progressZ <= FINISH_Z) {
+                    h.progressZ = FINISH_Z;
+                    h.finished = true;
+                }
+            });
+        };
+
         const renderLoop = () => {
             frameId = requestAnimationFrame(renderLoop);
-            // 実時間ベースで進める（低fpsでもスロー再生にならない）。
-            // タブ復帰時のワープ防止のため1フレーム最大0.25秒まで。
+            // 実時間ベース。タブ復帰時のワープ防止のため1フレーム最大0.1秒まで
             const now = performance.now();
-            const delta = Math.min((now - lastTime) / 1000, 0.25);
+            const delta = Math.min((now - lastTime) / 1000, 0.1);
             lastTime = now;
-            elapsed += delta;
-            const time = elapsed;
+
+            // 新しい発走／リセットを検知したらレース内部状態を初期化（それ以外では絶対に巻き戻さない）
+            if (runSeen !== raceRunRef.current) {
+                runSeen = raceRunRef.current;
+                raceTime = 0;
+                runActive = false;
+                finalPhaseStarted = false;
+                plans = meshes.map(() => null);
+                seed = Math.random() * 1000;
+                finishCooldown = -1;
+                gallopTimer = 0;
+                rankUpdateTimer = 0;
+                focusInitialized = false;
+            }
 
             const currentStatus = statusRef.current;
-            const currentCam = cameraModeRef.current;
-            const [winnerIdx, secondIdx, thirdIdx] = correctOrderRef.current;
             const isRacing = currentStatus === 'racing';
+            if (isRacing) runActive = true;
+            const order = correctOrderRef.current;
             // レースごとに異なる4種類のドラマチック演出シナリオ（大外一気、イン強襲、壮絶一騎打ち、逃げ粘り）
             const scenario = Math.abs(raceIndexRef.current || 0) % 4;
 
-            let leadHorse = meshes[0];
-
-            // ---- レース物理：1/60秒の固定ステップで積分（fpsに依存しない） ----
-            const stepHorses = (dt: number, simTime: number) => {
-                meshes.forEach((h, idx) => {
-                    if (h.finished) return;
-                    const remain = h.progressZ - FINISH_Z;
-
-                    // 各馬固有の激しいペースの波（道中の大混戦・抜きつ抜かれつのデッドヒート）
-                    const wave1 = Math.sin(simTime * 2.3 + idx * 1.85 + scenario * 0.7);
-                    const wave2 = Math.cos(simTime * 1.45 + idx * 2.9);
-                    const deadHeatJitter = (wave1 * 0.16) + (wave2 * 0.08);
-
-                    if (remain > 650) {
-                        // 【第1ステージ：スタート〜残り650m】
-                        // 序盤から全馬が激しく競り合い！順位が目まぐるしくシャッフル
-                        const baseSpeed = 1.05 + deadHeatJitter;
-                        if (scenario === 3 && idx === winnerIdx) {
-                            h.currentSpeed = 1.18 + deadHeatJitter; // 逃げパターン
-                        } else {
-                            h.currentSpeed = Math.max(0.88, Math.min(1.25, baseSpeed));
-                        }
-                    } else if (remain > 280) {
-                        // 【第2ステージ：中盤〜勝負どころ残り280m】
-                        // 後続集団が一気に押し寄せ、全頭が固まってのデッドヒート！
-                        const baseSpeed = 1.08 + deadHeatJitter;
-                        if (scenario === 0) {
-                            // パターン0: 大外一気型（本命馬が大外へコースを取る）
-                            if (idx === winnerIdx) {
-                                h.targetLaneX = 14.0;
-                                h.currentSpeed = 1.20;
-                            } else if (idx === secondIdx) {
-                                h.currentSpeed = 1.15 + deadHeatJitter;
-                            } else {
-                                h.currentSpeed = baseSpeed;
-                            }
-                        } else if (scenario === 1) {
-                            // パターン1: イン強襲型（本命馬が内ラチ沿いに潜り込む）
-                            if (idx === winnerIdx) {
-                                h.targetLaneX = -18.0;
-                                h.currentSpeed = 1.18;
-                            } else if (idx === secondIdx) {
-                                h.currentSpeed = 1.16 + deadHeatJitter;
-                            } else {
-                                h.currentSpeed = baseSpeed;
-                            }
-                        } else if (scenario === 2) {
-                            // パターン2: 2頭一騎打ち型（上位2頭が馬群を割って並びかける）
-                            if (idx === winnerIdx) {
-                                h.targetLaneX = 3.5;
-                                h.currentSpeed = 1.22 + Math.sin(simTime * 3.0) * 0.06;
-                            } else if (idx === secondIdx) {
-                                h.targetLaneX = -3.5;
-                                h.currentSpeed = 1.22 - Math.sin(simTime * 3.0) * 0.06;
-                            } else {
-                                h.currentSpeed = baseSpeed;
-                            }
-                        } else {
-                            // パターン3: 逃げ粘り型（先頭集団が激しくせめぎ合う）
-                            if (idx === winnerIdx) {
-                                h.currentSpeed = 1.16 + Math.sin(simTime * 2.0) * 0.05;
-                            } else if (idx === secondIdx || idx === thirdIdx) {
-                                h.currentSpeed = 1.18 + deadHeatJitter;
-                            } else {
-                                h.currentSpeed = baseSpeed;
-                            }
-                        }
-                    } else {
-                        // 【最終直線：残り280m〜ゴール】
-                        // 各シナリオに応じた最高潮のクライマックス！幹事指定の正解着順へドラマチックに収束
-                        if (scenario === 0) {
-                            // 大外から一気のゴボウ抜き！
-                            if (idx === winnerIdx) {
-                                h.targetLaneX = 14.0;
-                                h.currentSpeed = 1.62;
-                            } else if (idx === secondIdx) {
-                                h.targetLaneX = -4.0;
-                                h.currentSpeed = 1.30;
-                            } else if (idx === thirdIdx) {
-                                h.targetLaneX = 4.0;
-                                h.currentSpeed = 1.20;
-                            } else {
-                                h.currentSpeed = 0.94 + Math.sin(idx + simTime) * 0.04;
-                            }
-                        } else if (scenario === 1) {
-                            // インの内ラチ沿いから電光石火の強襲！
-                            if (idx === winnerIdx) {
-                                h.targetLaneX = -18.0;
-                                h.currentSpeed = 1.60;
-                            } else if (idx === secondIdx) {
-                                h.targetLaneX = 6.0;
-                                h.currentSpeed = 1.32;
-                            } else if (idx === thirdIdx) {
-                                h.targetLaneX = -2.0;
-                                h.currentSpeed = 1.22;
-                            } else {
-                                h.currentSpeed = 0.94 + Math.sin(idx + simTime) * 0.04;
-                            }
-                        } else if (scenario === 2) {
-                            // 壮絶な一騎打ち！ゴール前20mまで鼻差の叩き合い
-                            if (idx === winnerIdx) {
-                                h.targetLaneX = 3.5;
-                                const finalPush = remain < 35 ? 0.12 : 0;
-                                h.currentSpeed = 1.46 + Math.sin(simTime * 4.5) * 0.06 + finalPush;
-                            } else if (idx === secondIdx) {
-                                h.targetLaneX = -3.5;
-                                h.currentSpeed = 1.46 - Math.sin(simTime * 4.5) * 0.06;
-                            } else if (idx === thirdIdx) {
-                                h.targetLaneX = 9.0;
-                                h.currentSpeed = 1.25;
-                            } else {
-                                h.currentSpeed = 0.92 + Math.sin(idx + simTime) * 0.04;
-                            }
-                        } else {
-                            // 逃げ粘り！猛追する2着・3着をギリギリしのぎ切る
-                            if (idx === winnerIdx) {
-                                h.targetLaneX = 0;
-                                h.currentSpeed = 1.38;
-                            } else if (idx === secondIdx) {
-                                h.targetLaneX = -4.5;
-                                h.currentSpeed = 1.36;
-                            } else if (idx === thirdIdx) {
-                                h.targetLaneX = 4.5;
-                                h.currentSpeed = 1.33;
-                            } else {
-                                h.currentSpeed = 0.93 + Math.sin(idx + simTime) * 0.04;
-                            }
-                        }
-                    }
-
-                    h.currentLaneX += (h.targetLaneX - h.currentLaneX) * Math.min(1, dt * 3.5);
-                    // スピード感あふれる元の速さに戻す（34 m/s）
-                    h.progressZ -= h.currentSpeed * 34 * dt;
-                    if (h.progressZ <= FINISH_Z) {
-                        h.progressZ = FINISH_Z;
-                        h.finished = true;
-                    }
-                });
-            };
-
-            if (isRacing) {
-                // 安全策：レース中なのに全馬finishedのままなら即座にスタート位置へ自己修復
-                if (meshes.length > 0 && meshes.every(m => m.finished) && !hasFinishedRef.current) {
-                    meshes.forEach((h, i) => {
-                        h.progressZ = RACE_START_Z - ((i % 2) * 2.0) - (i * 0.4);
-                        h.finished = false;
-                        h.currentSpeed = 1.0;
-                        h.currentLaneX = h.baseLaneX;
-                        h.targetLaneX = h.baseLaneX;
-                    });
+            const simActive = isRacing || (runActive && currentStatus === 'result');
+            if (simActive) {
+                let remaining = delta;
+                while (remaining > 1e-6) {
+                    const dt = Math.min(MAX_STEP, remaining);
+                    stepRace(dt, order, scenario, isRacing);
+                    remaining -= dt;
                 }
-                simAccumulator += delta;
-                let steps = 0;
-                while (simAccumulator >= SIM_STEP && steps < 30) {
-                    stepHorses(SIM_STEP, time);
-                    simAccumulator -= SIM_STEP;
-                    steps++;
-                }
-            } else {
-                simAccumulator = 0;
-                finishCooldown = -1;
             }
 
+            let leadHorse = meshes[0];
+            let minZ = Infinity;
+            let maxZ = -Infinity;
             meshes.forEach((h, idx) => {
-                // メッシュへ反映（スピード感あふれる高速ストライド・弾み）
+                const moving = simActive && h.currentSpeed > 0.05;
+                gait[idx] += delta * (moving ? 17 * Math.max(0.5, h.currentSpeed) : 6);
+                const ph = gait[idx];
+
                 h.mesh.position.x = h.currentLaneX;
                 h.mesh.position.z = h.progressZ;
-                h.mesh.position.y = isRacing && !h.finished ? Math.abs(Math.sin(time * 18 * h.currentSpeed)) * 0.28 : 0;
+                h.mesh.position.y = moving ? Math.abs(Math.sin(ph * 1.06)) * 0.28 * Math.min(1, h.currentSpeed + 0.3) : 0;
 
-                const legSpeed = isRacing && !h.finished ? 17 * h.currentSpeed : 6;
-                const swing = Math.sin(time * legSpeed + idx);
+                const swing = Math.sin(ph);
                 h.legs.legFL.rotation.x = swing * 0.75;
                 h.legs.legBR.rotation.x = swing * 0.75;
                 h.legs.legFR.rotation.x = -swing * 0.75;
                 h.legs.legBL.rotation.x = -swing * 0.75;
-                h.legs.head.rotation.x = -Math.PI / 8 + Math.cos(time * legSpeed * 2) * 0.1;
-                h.legs.tail.rotation.z = Math.sin(time * legSpeed) * 0.25;
+                h.legs.head.rotation.x = -Math.PI / 8 + Math.cos(ph * 2) * 0.1;
+                h.legs.tail.rotation.z = Math.sin(ph) * 0.25;
 
-                // ゼッケン(A〜H)の丸バッジは常に最前面に描画されるため、
-                // カメラの真横を通過する馬のバッジが画面を覆わないよう近距離では隠す
+                // ゼッケン(A〜H)の丸バッジは常に最前面に描画されるため、近距離では隠す
                 h.badge.getWorldPosition(badgeWorldPos);
                 h.badge.visible = camera.position.distanceTo(badgeWorldPos) > 14;
 
-                if (h.progressZ < leadHorse.progressZ) {
-                    leadHorse = h;
-                }
+                if (h.progressZ < leadHorse.progressZ) leadHorse = h;
+                if (h.progressZ < minZ) minZ = h.progressZ;
+                if (h.progressZ > maxZ) maxZ = h.progressZ;
             });
 
             if (isRacing) {
@@ -1679,7 +1733,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                     gallopTimer = 0;
                 }
 
-                // リアルタイム順位並び替え（約0.2秒おきに各馬の進行度から順位を算出して反映）
+                // リアルタイム順位並び替え（約0.2秒おき）
                 rankUpdateTimer += delta;
                 if (rankUpdateTimer >= 0.2) {
                     rankUpdateTimer = 0;
@@ -1718,38 +1772,33 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                     writeCommentary("ゴールイン！！大歓声の中、着順が確定しました！");
                 }
 
-                // 先頭馬がゴール板を通過したら余韻タイマー（2.5秒）を開始
+                // 先頭馬がゴール板を通過したら余韻タイマー（最大3秒）を開始
                 if (leadHorse.progressZ <= FINISH_Z && finishCooldown < 0) {
-                    finishCooldown = 2.5; // 2.5秒間、ゴール通過の興奮と全馬の駆け抜けを映す
+                    finishCooldown = 3.0;
                 }
                 if (finishCooldown >= 0) {
                     finishCooldown -= delta;
                 }
 
-                // 先頭ゴール後、全頭ゴールまたは余韻終了で正式確定（途中で勝手に終わらない！）
+                // 先頭ゴール後、全頭ゴールまたは余韻終了で正式確定（途中で勝手に終わらない）
                 if (!hasFinishedRef.current && finishCooldown >= 0 && (finishCooldown <= 0 || meshes.every(m => m.finished))) {
                     statusRef.current = 'result';
                     finalizeRaceRef.current('local');
                 }
             }
 
-            // カメラ制御（右側HUDと被らないよう、画面中央の有効領域にレースをセンタリング）
-            const targetPos = leadHorse.mesh.position;
-            const camLerp = 1 - Math.pow(1 - 0.08, delta * 60);
-            if (currentCam === 'follow') {
-                camera.position.lerp(camTarget.set(targetPos.x + 14, targetPos.y + 13, targetPos.z + 36), camLerp);
-                camera.lookAt(targetPos.x + 5, targetPos.y + 2, targetPos.z - 10);
-            } else if (currentCam === 'side') {
-                camera.position.lerp(camTarget.set(targetPos.x + 42, targetPos.y + 8, targetPos.z - 2), camLerp);
-                camera.lookAt(targetPos.x + 6, targetPos.y + 2, targetPos.z);
-            } else if (currentCam === 'front') {
-                camera.position.lerp(camTarget.set(targetPos.x + 6, targetPos.y + 6, targetPos.z - 36), camLerp);
-                camera.lookAt(targetPos.x + 6, targetPos.y + 2, targetPos.z);
-            } else {
-                // 俯瞰（デフォルト）：右斜め前からの俯瞰アングル。全頭とワイドな芝生が画面中央に堂々と収まるセンタリング
-                camera.position.lerp(camTarget.set(targetPos.x + 10, 26, targetPos.z - 32), camLerp);
-                camera.lookAt(targetPos.x - 8, 2, targetPos.z + 4);
+            // 固定カメラの平行移動：先頭寄りの馬群中心を追う（ズーム・回転は一切しない）
+            if (meshes.length > 0) {
+                const packSpan = Math.min(maxZ - minZ, 40);
+                const focusTarget = minZ + packSpan * 0.45;
+                if (!focusInitialized) {
+                    focusZ = focusTarget;
+                    focusInitialized = true;
+                } else {
+                    focusZ += (focusTarget - focusZ) * (1 - Math.exp(-delta * 5));
+                }
             }
+            placeCamera(focusZ);
 
             // スクリーン枠が表示されている時だけ描画（非表示中もレース進行は継続）
             if (containerElRef.current) {
@@ -1794,6 +1843,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         if (statusRef.current === 'racing') return;
         finishedRacesRef.current.delete(currentRaceIndex);
         hasFinishedRef.current = false;
+        runIdRef.current = `${currentRaceIndex}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         resetHorsePositions();
         statusRef.current = 'racing';
         setGameStatus('racing');
@@ -2486,21 +2536,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             </div>
                                         </div>
 
-                                        {/* 右側：カメラ切替 ＋ 残り距離メーター ＋ 選択肢＆リアルタイム順位変動ボード */}
+                                        {/* 右側：残り距離メーター ＋ 選択肢＆リアルタイム順位変動ボード（カメラは右斜め前の俯瞰で固定） */}
                                         <div className="flex flex-col items-end gap-2 pointer-events-auto">
-                                            {/* カメラアングル切り替えボタン */}
-                                            <div className="flex gap-1 bg-slate-950/85 backdrop-blur p-1 rounded-xl border border-slate-800 shadow">
-                                                {(['follow', 'side', 'front', 'top'] as CameraMode[]).map(m => (
-                                                    <button
-                                                        key={m}
-                                                        onClick={() => setCameraMode(m)}
-                                                        className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${cameraMode === m ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'}`}
-                                                    >
-                                                        {m === 'follow' ? '追走' : m === 'side' ? 'サイド' : m === 'front' ? '正面' : '俯瞰'}
-                                                    </button>
-                                                ))}
-                                            </div>
-
                                             {/* 残り距離メーター（右側に設置） */}
                                             <div className="bg-slate-950/90 backdrop-blur border border-slate-700/80 rounded-xl px-4 py-2 flex items-center justify-between shadow-xl font-mono w-64 sm:w-80">
                                                 <span className="text-xs sm:text-sm text-slate-300 font-bold">残り距離</span>
