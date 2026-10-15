@@ -95,6 +95,7 @@ export const RACE_DISTANCE = RACE_START_Z - FINISH_Z; // 1000m
 export const SIM_STEP = 1 / 60;
 export const HORSE_SPACING = 5.8;
 const FINISH_COOLDOWN = 2.5; // 先頭がゴールしてから確定までの余韻（秒）
+const ALL_FINISH_COOLDOWN = 2.2; // 全馬がゴールラインを通過してからの余韻（秒）
 const MAX_RACE_SEC = 120;
 
 export interface SimHorse {
@@ -110,6 +111,7 @@ export interface SimState {
   t: number;              // 発走からの経過秒
   horses: SimHorse[];
   leaderFinishT: number | null;
+  allFinishT: number | null;
   done: boolean;          // 着順確定タイミングに達した
 }
 
@@ -120,6 +122,7 @@ export function createSimState(): SimState {
   return {
     t: 0,
     leaderFinishT: null,
+    allFinishT: null,
     done: false,
     horses: Array.from({ length: OPTION_COUNT }, (_, i) => ({
       baseLaneX: laneXOf(i), laneX: laneXOf(i), targetLaneX: laneXOf(i), z: startZOf(i), speed: 1.0, finished: false
@@ -286,16 +289,26 @@ export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
   });
 
   s.horses.forEach(h => {
-    if (h.finished) return;
     h.laneX += (h.targetLaneX - h.laneX) * Math.min(1, dt * 3.5);
-    h.z -= h.speed * 34 * dt; // 34 m/s
-    if (h.z <= FINISH_Z) { h.z = FINISH_Z; h.finished = true; }
+    // ゴール通過後も急停止せず、奥へ走り抜ける
+    const runSpeed = h.finished ? Math.max(0.45, h.speed * 0.75) : h.speed;
+    h.z -= runSpeed * 34 * dt;
+    if (!h.finished && h.z <= FINISH_Z) {
+      h.finished = true;
+    }
   });
 
   s.t += dt;
   if (s.leaderFinishT === null && s.horses.some(h => h.finished)) s.leaderFinishT = s.t;
-  if (!s.done && s.leaderFinishT !== null && (s.t >= s.leaderFinishT + FINISH_COOLDOWN || s.horses.every(h => h.finished))) {
-    s.done = true;
+  if (s.allFinishT === null && s.horses.every(h => h.finished)) s.allFinishT = s.t;
+
+  // 全馬がゴールラインを通過した後に余韻を持ってレース終了。フェイルセーフとして先頭ゴール後15秒でも終了
+  if (!s.done) {
+    if (s.allFinishT !== null && s.t >= s.allFinishT + ALL_FINISH_COOLDOWN) {
+      s.done = true;
+    } else if (s.leaderFinishT !== null && s.t >= s.leaderFinishT + 15) {
+      s.done = true;
+    }
   }
   if (s.t >= MAX_RACE_SEC) s.done = true;
 }

@@ -922,12 +922,12 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         let focusZ = RACE_START_Z;
         let focusInitialized = false;
 
-        // 固定カメラ（右斜め前からの俯瞰・平行移動のみ）
-        const CAM_X = 26;
-        const CAM_Y = 38;
-        const CAM_OFFSET_Z = -48;
-        const LOOK_X = -4;
-        const LOOK_OFFSET_Z = 8;
+        // 固定カメラ（引き・高さを上げ、注視点を内ラチ側に寄せることで、上部UIや順位表と馬が一切被らない）
+        const CAM_X = 35;
+        const CAM_Y = 46;
+        const CAM_OFFSET_Z = -54;
+        const LOOK_X = -12;
+        const LOOK_OFFSET_Z = 12;
         const placeCamera = (z: number) => {
             camera.position.set(CAM_X, CAM_Y, z + CAM_OFFSET_Z);
             camera.lookAt(LOOK_X, 0, z + LOOK_OFFSET_Z);
@@ -985,7 +985,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             sim.horses.forEach((h, i) => { if (h.z < sim.horses[lead].z) lead = i; });
             meshes.forEach((m, i) => {
                 const h = sim.horses[i];
-                const moving = running && !h.finished;
+                // 全馬がゴール板を駆け抜けるまでアニメーションを継続
+                const moving = running;
                 m.mesh.position.set(h.laneX, moving ? Math.abs(Math.sin(elapsed * 18 * h.speed)) * 0.28 : 0, h.z);
                 const legSpeed = moving ? 17 * h.speed : 6;
                 const swing = Math.sin(elapsed * legSpeed + i);
@@ -1277,7 +1278,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }
 
     const hostPanelLocked = isHostRole && !hostAuthed;
-    const overlayW = role === 'multiview' ? 'w-52' : 'w-64 sm:w-80';
+    const overlayW = 'w-40 sm:w-48 lg:w-52';
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none overflow-x-hidden">
@@ -1581,31 +1582,32 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
                                 {/* 上部オーバーレイ：左＝レース名（特大）、右＝残り距離・投票数／順位ボード */}
                                 <div className="absolute top-0 inset-x-0 p-3 sm:p-5 z-20 flex items-start justify-between pointer-events-none">
-                                    {/* 左上：レースの名前（改行せず文字サイズで調整・途切れない） */}
+                                    {/* 左上：レースの名前（全体が見えるよう文字サイズ調節・枠内自動収容） */}
                                     <div className="flex flex-col gap-2 pointer-events-auto">
-                                        <div className="bg-slate-950/90 backdrop-blur-md border-2 border-amber-500/60 rounded-2xl px-5 py-3.5 shadow-2xl font-mono flex items-center gap-3.5 max-w-lg">
-                                            <span className="text-3xl sm:text-4xl shrink-0">🏇</span>
+                                        <div className="bg-slate-950/90 backdrop-blur-md border-2 border-amber-500/60 rounded-2xl px-4 py-2.5 sm:px-5 sm:py-3 shadow-2xl font-mono flex items-center gap-3 max-w-xs sm:max-w-sm lg:max-w-md">
+                                            <span className="text-2xl sm:text-3xl shrink-0">🏇</span>
                                             <div className="min-w-0 flex-1">
-                                                <div className="text-xs sm:text-sm text-amber-400 font-black tracking-widest uppercase">
+                                                <div className="text-[10px] sm:text-xs text-amber-400 font-black tracking-widest uppercase">
                                                     RACE {currentRaceIndex + 1} / 全{races.length}R
                                                 </div>
                                                 {(() => {
                                                     const nameLen = (currentRace.name || '').length;
                                                     const nameSizeClass =
-                                                        nameLen > 24 ? 'text-xs sm:text-sm' :
-                                                        nameLen > 18 ? 'text-sm sm:text-base' :
-                                                        nameLen > 13 ? 'text-base sm:text-lg lg:text-xl' :
-                                                        nameLen > 8  ? 'text-lg sm:text-xl lg:text-2xl' :
-                                                        'text-xl sm:text-2xl lg:text-3xl';
+                                                        nameLen > 22 ? 'text-xs sm:text-sm' :
+                                                        nameLen > 15 ? 'text-sm sm:text-base' :
+                                                        nameLen > 10 ? 'text-base sm:text-lg' :
+                                                        'text-lg sm:text-xl lg:text-2xl';
                                                     return (
-                                                        <div className={`font-black text-white whitespace-nowrap drop-shadow leading-tight mt-0.5 ${nameSizeClass}`}>
+                                                        <div className={`font-black text-white drop-shadow leading-snug mt-0.5 break-words ${nameSizeClass}`}>
                                                             {currentRace.name}
                                                         </div>
                                                     );
                                                 })()}
-                                                <div className="text-xs sm:text-sm text-amber-200/90 font-bold truncate mt-1">
-                                                    {currentRace.question}
-                                                </div>
+                                                {currentRace.question && (
+                                                    <div className="text-[11px] sm:text-xs text-amber-200/90 font-bold mt-0.5 break-words line-clamp-2">
+                                                        {currentRace.question}
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
                                     </div>
