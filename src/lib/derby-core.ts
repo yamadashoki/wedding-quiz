@@ -15,7 +15,7 @@ export const OPTION_COUNT = 8;
 //   6点 サンレンタン：1〜3位の「選択肢」と「順位」がぴったり当たった
 //   4点 サンレンプク：1〜3位の「選択肢」が当たった（順位は不問）
 //   3点 ニレンタン　：1位と2位の「選択肢」と「順位」がぴったり当たった
-//   2点 ブクブク　　：1〜3位のうち「選択肢」が2つだけ当たった（順位は不問）
+//   2点 プクプク　　：1〜3位のうち「選択肢」が2つだけ当たった（順位は不問）
 //   1点 タン　　　　：1位の「選択肢」と「順位」だけが当たった
 // --------------------------------------------------------------
 export type BetRankType = 'sanrentan' | 'sanrenpuku' | 'nirentan' | 'bukubuku' | 'tan' | 'none';
@@ -24,7 +24,7 @@ export const SCORE_RULES = [
   { type: 'sanrentan', pt: 6, name: 'サンレンタン', desc: '1〜3位の「選択肢」と「順位」がぴったり当たった' },
   { type: 'sanrenpuku', pt: 4, name: 'サンレンプク', desc: '1〜3位の「選択肢」が当たった' },
   { type: 'nirentan', pt: 3, name: 'ニレンタン', desc: '1位と2位の「選択肢」と「順位」がぴったり当たった' },
-  { type: 'bukubuku', pt: 2, name: 'ブクブク', desc: '1〜3位のうち「選択肢」が2つだけ当たった' },
+  { type: 'bukubuku', pt: 2, name: 'プクプク', desc: '1〜3位のうち「選択肢」が2つだけ当たった' },
   { type: 'tan', pt: 1, name: 'タン', desc: '1位の「選択肢」と「順位」だけが当たった' }
 ] as const;
 
@@ -105,6 +105,7 @@ export interface SimHorse {
   z: number;
   speed: number;
   finished: boolean;
+  finishRank: number | null; // ゴールした確定着順（1〜8）
 }
 
 export interface SimState {
@@ -112,6 +113,7 @@ export interface SimState {
   horses: SimHorse[];
   leaderFinishT: number | null;
   allFinishT: number | null;
+  finishCount: number;    // ゴールした頭数カウント
   done: boolean;          // 着順確定タイミングに達した
 }
 
@@ -123,9 +125,10 @@ export function createSimState(): SimState {
     t: 0,
     leaderFinishT: null,
     allFinishT: null,
+    finishCount: 0,
     done: false,
     horses: Array.from({ length: OPTION_COUNT }, (_, i) => ({
-      baseLaneX: laneXOf(i), laneX: laneXOf(i), targetLaneX: laneXOf(i), z: startZOf(i), speed: 1.0, finished: false
+      baseLaneX: laneXOf(i), laneX: laneXOf(i), targetLaneX: laneXOf(i), z: startZOf(i), speed: 1.0, finished: false, finishRank: null
     }))
   };
 }
@@ -295,6 +298,8 @@ export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
     if (h.z <= FINISH_Z) {
       h.z = FINISH_Z;
       h.finished = true;
+      s.finishCount++;
+      h.finishRank = s.finishCount;
     }
   });
 
@@ -341,5 +346,18 @@ export function computeRaceDurationMs(order: BetOrder, raceIndex: number): numbe
 
 /** 位置から現在の順位（先頭から並べた馬Idx） */
 export function ranksOf(s: SimState): number[] {
-  return s.horses.map((h, i) => ({ i, z: h.z })).sort((a, b) => a.z - b.z).map(x => x.i);
+  return s.horses
+    .map((h, i) => ({ i, h }))
+    .sort((a, b) => {
+      // 1. 両頭ともゴール済みなら確定着順（finishRank）で順位付け
+      if (a.h.finished && b.h.finished) {
+        return (a.h.finishRank ?? 99) - (b.h.finishRank ?? 99);
+      }
+      // 2. 片方だけゴール済みなら、ゴールした馬が上位
+      if (a.h.finished) return -1;
+      if (b.h.finished) return 1;
+      // 3. 走行中ならZ座標が小さい（ゴールに近い）馬が上位
+      return a.h.z - b.h.z;
+    })
+    .map(x => x.i);
 }

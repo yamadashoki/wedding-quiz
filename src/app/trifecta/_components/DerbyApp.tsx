@@ -976,6 +976,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             const running = status === 'racing' && inRace && !sim.done;
 
             if (status === 'racing' && inRace && sim.done && localFinishedRef.current !== key) {
+                setRealtimeRanks(ranksOf(sim));
                 onLocalFinishRef.current(key);
             }
 
@@ -1001,12 +1002,12 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
             if (running) {
                 rankTimer += delta;
-                if (rankTimer >= 0.2) {
+                const sorted = ranksOf(sim);
+                if (rankTimer >= 0.05) {
                     rankTimer = 0;
-                    const sorted = ranksOf(sim);
                     setRealtimeRanks(prev => (prev.every((v, i) => v === sorted[i]) ? prev : sorted));
                 }
-                const leader = sim.horses[lead];
+                const leader = sim.horses[sorted[0] ?? lead];
                 const remain = Math.min(1000, Math.max(0, Math.floor(leader.z - FINISH_Z)));
                 writeRemain(remain);
             }
@@ -1954,12 +1955,19 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                     <span className="font-bold text-slate-300">正解着順（幹事のみ表示）</span>
                                                     {gameStatus !== 'racing' && <span className="text-[10px] text-amber-400">変更可</span>}
                                                 </div>
-                                                <div className="grid grid-cols-3 gap-1.5 font-mono">
+                                                <div className="space-y-2 font-mono">
                                                     {[0, 1, 2].map(rank => {
                                                         const cur = correctOrder ? correctOrder[rank] : null;
+                                                        const badgeStyle = rank === 0
+                                                            ? 'bg-amber-500 text-slate-950 font-black'
+                                                            : rank === 1
+                                                            ? 'bg-slate-300 text-slate-900 font-black'
+                                                            : 'bg-amber-700 text-amber-100 font-black';
                                                         return (
-                                                            <div key={rank} className="bg-slate-900 border border-slate-800 rounded-lg p-1.5 text-center">
-                                                                <div className="text-[10px] text-slate-400">{rank + 1}着</div>
+                                                            <div key={rank} className="bg-slate-900 border border-slate-800 rounded-xl p-2.5 flex items-center gap-3">
+                                                                <div className={`w-12 py-1 rounded-lg text-xs text-center shrink-0 shadow-sm ${badgeStyle}`}>
+                                                                    {rank + 1}着
+                                                                </div>
                                                                 <select
                                                                     disabled={gameStatus === 'racing' || hostBusy}
                                                                     value={cur ?? ''}
@@ -1969,11 +1977,11 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                                         next[rank] = val;
                                                                         void runHost('set_correct_order', { correctOrder: next });
                                                                     }}
-                                                                    className="w-full bg-slate-950 border border-slate-700 rounded text-xs font-bold text-amber-300 p-1 mt-1"
+                                                                    className="flex-1 bg-slate-950 border border-slate-700 rounded-lg text-xs font-bold text-amber-300 p-2 min-w-0 focus:outline-none focus:border-amber-500"
                                                                 >
                                                                     {HORSES_DATA.map((h, i) => (
                                                                         <option key={i} value={i}>
-                                                                            {h.letter}: {currentRace.options[i]?.slice(0, 8) || h.name}
+                                                                            {h.letter} : {currentRace.options[i] || h.name}
                                                                         </option>
                                                                     ))}
                                                                 </select>
