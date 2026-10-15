@@ -7,7 +7,6 @@ import {
     advanceSimTo, computeWinOdds, createSimState, formatOdds, judgeBet, ranksOf, scenarioOf,
     FINISH_Z, RACE_START_Z, SCORE_RULES, type BetOrder, type BetRankType, type SimState
 } from '@/lib/derby-core';
-import AllStarResultScreen from './AllStarResultScreen';
 
 // ==============================================================
 // アイコン（lucide-react 互換の見た目をインラインSVGで定義。外部パッケージ不要）
@@ -1078,7 +1077,16 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
     const ranked = useMemo(() => {
         const sorted = [...participants].sort((a, b) => b.score - a.score);
-        return sorted;
+        let currentRank = 1;
+        return sorted.map((p, i) => {
+            if (i > 0 && p.score < sorted[i - 1].score) {
+                currentRank = i + 1;
+            }
+            return {
+                ...p,
+                rank: currentRank,
+            };
+        });
     }, [participants]);
 
     // --------------------------------------------------------------
@@ -1721,13 +1729,67 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                     </div>
                                 )}
 
-                                {/* 総合表彰（オールスター感謝祭風演出：下位から上位へスクロール、同率タイ完全対応） */}
+                                {/* 総合表彰（元の表彰台スタイル・同率順位対応） */}
                                 {displayStatus === 'grand_finale' && (
-                                    <AllStarResultScreen
-                                        participants={participants}
-                                        onClose={closeGrandFinale}
-                                        canClose={role === 'multiview' && hostAuthed}
-                                    />
+                                    <div className="absolute inset-0 z-50 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 backdrop-blur-xl flex flex-col justify-between p-4 sm:p-6 lg:p-10 text-center overflow-y-auto">
+                                        <div className="shrink-0 space-y-2">
+                                            <h1 className="text-3xl sm:text-4xl lg:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wider drop-shadow">
+                                                結果発表
+                                            </h1>
+                                        </div>
+
+                                        <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
+                                            <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6 items-end">
+                                                {([1, 0, 2] as const).map(slotIdx => {
+                                                    const u = ranked[slotIdx];
+                                                    const rank = u ? u.rank : (slotIdx === 0 ? 1 : slotIdx === 1 ? 2 : 3);
+                                                    const is1st = rank === 1;
+                                                    const is2nd = rank === 2;
+                                                    const styles = is1st
+                                                        ? { box: `${slotIdx === 0 ? 'order-1 md:order-2' : 'order-2 md:order-1'} bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-amber-400 shadow-[0_0_45px_rgba(245,158,11,0.35)] md:h-[360px] md:-translate-y-4`, badge: 'w-16 h-16 bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 text-2xl', name: 'text-2xl sm:text-3xl lg:text-5xl', pt: 'text-3xl sm:text-5xl text-amber-300' }
+                                                        : is2nd
+                                                            ? { box: 'order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-slate-300/80 md:h-[300px]', badge: 'w-12 h-12 bg-slate-300 text-slate-900 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-slate-200' }
+                                                            : { box: 'order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-amber-700/80 md:h-[280px]', badge: 'w-12 h-12 bg-amber-700 text-amber-100 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-amber-400' };
+                                                    return (
+                                                        <div key={slotIdx} className={`${styles.box} border-2 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative justify-between transform`}>
+                                                            {is1st && <div className="absolute -top-7 inset-x-0 flex justify-center"><span className="text-4xl animate-bounce drop-shadow">👑</span></div>}
+                                                            <div className={`${styles.badge} rounded-full flex items-center justify-center font-black shadow`}>
+                                                                {u ? `${u.rank}位` : `${slotIdx === 0 ? 1 : slotIdx === 1 ? 2 : 3}位`}
+                                                            </div>
+                                                            <div className="my-3 text-center w-full">
+                                                                <div className={`${styles.name} font-black text-white truncate px-2`}>{u ? u.name : '―'}</div>
+                                                            </div>
+                                                            <div className="bg-slate-900/90 border border-slate-700 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
+                                                                <span className={`${styles.pt} font-black font-mono`}>{u ? u.score : 0} pt</span>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+
+                                            {ranked.length > 3 && (
+                                                <div className="w-full mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-left shadow-lg">
+                                                    <div className="flex flex-wrap gap-2.5 max-h-32 overflow-y-auto">
+                                                        {ranked.slice(3).map((u) => (
+                                                            <span key={u.id} className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-sm font-bold">
+                                                                <span className="font-mono text-slate-400">{u.rank}位</span>
+                                                                <span className="text-white">{u.name}</span>
+                                                                <span className="font-mono text-amber-400">{u.score} pt</span>
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="shrink-0 w-full max-w-md mx-auto">
+                                            {role === 'multiview' && hostAuthed && (
+                                                <button onClick={closeGrandFinale} disabled={hostBusy} className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-sm border border-slate-700 shadow">
+                                                    表彰を閉じる
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
                                 )}
                             </div>
                         </div>
