@@ -7,6 +7,7 @@ import {
     advanceSimTo, computeWinOdds, createSimState, formatOdds, judgeBet, ranksOf, scenarioOf,
     FINISH_Z, RACE_START_Z, SCORE_RULES, type BetOrder, type BetRankType, type SimState
 } from '@/lib/derby-core';
+import AllStarResultScreen from './AllStarResultScreen';
 
 // ==============================================================
 // アイコン（lucide-react 互換の見た目をインラインSVGで定義。外部パッケージ不要）
@@ -804,10 +805,10 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         dirLight.castShadow = true;
         scene.add(dirLight);
 
-        // コース芝生（幅64m）
-        const ground = new THREE.Mesh(new THREE.PlaneGeometry(trackWidth, trackLength), new THREE.MeshLambertMaterial({ map: generateTurfTexture() }));
+        // コース芝生（幅広化：スタンド壁を外側に下げても隙間ができないよう拡張）
+        const ground = new THREE.Mesh(new THREE.PlaneGeometry(trackWidth + 30, trackLength), new THREE.MeshLambertMaterial({ map: generateTurfTexture() }));
         ground.rotation.x = -Math.PI / 2;
-        ground.position.set(0, 0, -trackLength / 2 + 100);
+        ground.position.set(-10, 0, -trackLength / 2 + 100);
         ground.receiveShadow = true;
         scene.add(ground);
 
@@ -815,9 +816,9 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         scene.add(createTrackFence(-trackWidth / 2, trackLength));
         scene.add(createTrackFence(trackWidth / 2, trackLength));
 
-        // スタンド壁
+        // スタンド壁（外側へ十分離して看板が壁にめり込まないよう配置）
         const standWall = new THREE.Mesh(new THREE.BoxGeometry(10, 12, trackLength), new THREE.MeshLambertMaterial({ map: generateStandWallTexture() }));
-        standWall.position.set(-trackWidth / 2 - 6, 6, -trackLength / 2 + 100);
+        standWall.position.set(-trackWidth / 2 - 14, 6, -trackLength / 2 + 100);
         scene.add(standWall);
 
         // ゴールポール
@@ -825,8 +826,8 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         finishPole.position.set(-trackWidth / 2 - 1, 8, FINISH_Z);
         scene.add(finishPole);
 
-        // 残り距離標識（壁側・右斜め前の俯瞰から正面に見える角度・文字切れのない特大サイズ）
-        const wallCourseX = -trackWidth / 2 - 0.8;
+        // 残り距離標識（内ラチの外側・スタンド壁から離れた安全な位置に配置、文字切れゼロのクッキリ視認）
+        const wallCourseX = -trackWidth / 2 - 2.8;
         [1000, 800, 600, 400, 200, 100].forEach(dist => {
             const cv = document.createElement('canvas');
             cv.width = 512; cv.height = 256;
@@ -839,39 +840,39 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             c2.strokeStyle = '#dc2626';
             c2.strokeRect(8, 8, 496, 240);
 
-            // 残り距離 数字（文字切れ防止：枠内に必ず収まるよう動的フィット）
+            // 残り距離 数字（文字切れ防止：余白を確保して枠内に必ず収まるよう動的フィット）
             const distStr = String(dist);
-            let numFontSize = dist >= 1000 ? 112 : 128;
+            let numFontSize = dist >= 1000 ? 104 : 120;
             c2.font = `900 ${numFontSize}px "Impact", "Arial Black", sans-serif`;
-            while (c2.measureText(distStr).width > 420 && numFontSize > 60) {
+            while (c2.measureText(distStr).width > 380 && numFontSize > 50) {
                 numFontSize -= 4;
                 c2.font = `900 ${numFontSize}px "Impact", "Arial Black", sans-serif`;
             }
             c2.fillStyle = '#dc2626';
             c2.textAlign = 'center';
             c2.textBaseline = 'middle';
-            c2.fillText(distStr, 256, 100);
+            c2.fillText(distStr, 256, 96);
 
             // "残り" ＋ "m" サブテキスト（中央配置）
-            let subFontSize = 44;
+            let subFontSize = 40;
             c2.font = `bold ${subFontSize}px sans-serif`;
             const subText = `残り ${dist}m`;
-            while (c2.measureText(subText).width > 430 && subFontSize > 24) {
+            while (c2.measureText(subText).width > 390 && subFontSize > 22) {
                 subFontSize -= 2;
                 c2.font = `bold ${subFontSize}px sans-serif`;
             }
             c2.fillStyle = '#0f172a';
-            c2.fillText(subText, 256, 195);
+            c2.fillText(subText, 256, 188);
 
             // 右斜め前カメラ (26, 38, -48) からしっかり正対して見える角度（Math.PI * 0.27）
             const board = new THREE.Mesh(new THREE.PlaneGeometry(10.5, 5.25), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), side: THREE.DoubleSide }));
             board.position.set(wallCourseX, 8.2, FINISH_Z + dist);
             board.rotation.y = Math.PI * 0.27;
 
-            const arm = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.4, 0.4), new THREE.MeshLambertMaterial({ color: 0x334155 }));
-            arm.position.set(wallCourseX - 0.8, 8.2, FINISH_Z + dist);
-            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 8.5, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }));
-            post.position.set(wallCourseX + 0.1, 4.25, FINISH_Z + dist);
+            const arm = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.4, 0.4), new THREE.MeshLambertMaterial({ color: 0x334155 }));
+            arm.position.set(wallCourseX, 8.2, FINISH_Z + dist);
+            const post = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 8.5, 8), new THREE.MeshLambertMaterial({ color: 0xffffff }));
+            post.position.set(wallCourseX, 4.25, FINISH_Z + dist);
             scene.add(board, arm, post);
         });
 
@@ -1389,7 +1390,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 maxLength={30}
                                                 onChange={(e) => setNameInput(e.target.value)}
                                                 onKeyDown={(e) => { if (e.key === 'Enter') submitName(); }}
-                                                placeholder="例：新郎友人・たけし"
+                                                placeholder="例：たいち、かざねなど"
                                                 className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-xs text-white"
                                             />
                                             <button
@@ -1413,6 +1414,26 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 </span>
                                             </div>
                                         </div>
+
+                                        {gameStatus === 'grand_finale' && (
+                                            <div className="bg-gradient-to-r from-amber-500/20 via-blue-950/40 to-amber-500/20 border-2 border-amber-400/80 rounded-2xl p-4 text-center space-y-2 shadow-xl animate-pulse">
+                                                <div className="text-2xl">🏆</div>
+                                                <div className="text-sm font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 to-yellow-300">
+                                                    総合成績発表中！
+                                                </div>
+                                                <p className="text-xs text-slate-300">
+                                                    会場スクリーンで結果発表を行っています！
+                                                </p>
+                                                <div className="pt-2 border-t border-slate-800 flex justify-around items-center">
+                                                    <div>
+                                                        <div className="text-[10px] text-slate-400">あなたの最終スコア</div>
+                                                        <div className="text-lg font-black font-mono text-amber-300">
+                                                            {participants.find(p => p.id === participantId)?.score ?? 0} pt
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
 
                                         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 space-y-1.5">
                                             <div className="flex items-center justify-between text-[11px] font-mono">
@@ -1698,62 +1719,13 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                     </div>
                                 )}
 
-                                {/* 総合表彰 */}
+                                {/* 総合表彰（オールスター感謝祭風演出：下位から上位へスクロール、同率タイ完全対応） */}
                                 {displayStatus === 'grand_finale' && (
-                                    <div className="absolute inset-0 z-50 bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 backdrop-blur-xl flex flex-col justify-between p-4 sm:p-6 lg:p-10 text-center overflow-y-auto">
-                                        <div className="shrink-0 space-y-2">
-                                            <h1 className="text-3xl sm:text-4xl lg:text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wider drop-shadow">
-                                                結果発表
-                                            </h1>
-                                        </div>
-
-                                        <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
-                                            <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6 items-end">
-                                                {([1, 0, 2] as const).map(i => {
-                                                    const u = ranked[i];
-                                                    const styles = i === 0
-                                                        ? { box: 'order-1 md:order-2 bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-amber-400 shadow-[0_0_45px_rgba(245,158,11,0.35)] md:h-[360px] md:-translate-y-4', badge: 'w-16 h-16 bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 text-2xl', name: 'text-2xl sm:text-3xl lg:text-5xl', pt: 'text-3xl sm:text-5xl text-amber-300' }
-                                                        : i === 1
-                                                            ? { box: 'order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-slate-300/80 md:h-[300px]', badge: 'w-12 h-12 bg-slate-300 text-slate-900 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-slate-200' }
-                                                            : { box: 'order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-amber-700/80 md:h-[280px]', badge: 'w-12 h-12 bg-amber-700 text-amber-100 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-amber-400' };
-                                                    return (
-                                                        <div key={i} className={`${styles.box} border-2 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative justify-between transform`}>
-                                                            {i === 0 && <div className="absolute -top-7 inset-x-0 flex justify-center"><span className="text-4xl animate-bounce drop-shadow">👑</span></div>}
-                                                            <div className={`${styles.badge} rounded-full flex items-center justify-center font-black shadow`}>{i + 1}位</div>
-                                                            <div className="my-3 text-center w-full">
-                                                                <div className={`${styles.name} font-black text-white truncate px-2`}>{u ? u.name : '―'}</div>
-                                                            </div>
-                                                            <div className="bg-slate-900/90 border border-slate-700 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
-                                                                <span className={`${styles.pt} font-black font-mono`}>{u ? u.score : 0} pt</span>
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-
-                                            {ranked.length > 3 && (
-                                                <div className="w-full mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-left shadow-lg">
-                                                    <div className="flex flex-wrap gap-2.5 max-h-32 overflow-y-auto">
-                                                        {ranked.slice(3).map((u, i) => (
-                                                            <span key={u.id} className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-sm font-bold">
-                                                                <span className="font-mono text-slate-400">{i + 4}位</span>
-                                                                <span className="text-white">{u.name}</span>
-                                                                <span className="font-mono text-amber-400">{u.score} pt</span>
-                                                            </span>
-                                                        ))}
-                                                    </div>
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        <div className="shrink-0 w-full max-w-md mx-auto">
-                                            {role === 'multiview' && hostAuthed && (
-                                                <button onClick={closeGrandFinale} disabled={hostBusy} className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-sm border border-slate-700 shadow">
-                                                    表彰を閉じる
-                                                </button>
-                                            )}
-                                        </div>
-                                    </div>
+                                    <AllStarResultScreen
+                                        participants={participants}
+                                        onClose={closeGrandFinale}
+                                        canClose={role === 'multiview' && hostAuthed}
+                                    />
                                 )}
                             </div>
                         </div>
