@@ -984,17 +984,17 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
             sim.horses.forEach((h, i) => { if (h.z < sim.horses[lead].z) lead = i; });
             meshes.forEach((m, i) => {
                 const h = sim.horses[i];
-                // 全馬がゴール板を駆け抜けるまでアニメーションを継続
-                const moving = running;
+                // ゴールした馬はゴールラインで止まり、未ゴールの馬はゴールまで走り続ける
+                const moving = running && !h.finished;
                 m.mesh.position.set(h.laneX, moving ? Math.abs(Math.sin(elapsed * 18 * h.speed)) * 0.28 : 0, h.z);
-                const legSpeed = moving ? 17 * h.speed : 6;
-                const swing = Math.sin(elapsed * legSpeed + i);
+                const legSpeed = moving ? 17 * h.speed : 0;
+                const swing = moving ? Math.sin(elapsed * legSpeed + i) : 0;
                 m.legs.legFL.rotation.x = swing * 0.75;
                 m.legs.legBR.rotation.x = swing * 0.75;
                 m.legs.legFR.rotation.x = -swing * 0.75;
                 m.legs.legBL.rotation.x = -swing * 0.75;
-                m.legs.head.rotation.x = -Math.PI / 8 + Math.cos(elapsed * legSpeed * 2) * 0.1;
-                m.legs.tail.rotation.z = Math.sin(elapsed * legSpeed) * 0.25;
+                m.legs.head.rotation.x = -Math.PI / 8 + (moving ? Math.cos(elapsed * legSpeed * 2) * 0.1 : 0);
+                m.legs.tail.rotation.z = moving ? Math.sin(elapsed * legSpeed) * 0.25 : 0;
                 m.badge.getWorldPosition(badgeWorldPos);
                 m.badge.visible = camera.position.distanceTo(badgeWorldPos) > 14;
             });
@@ -1303,7 +1303,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
     }
 
     const hostPanelLocked = isHostRole && !hostAuthed;
-    const overlayW = 'w-40 sm:w-48 lg:w-52';
+    const overlayW = 'w-52 sm:w-60 lg:w-64';
 
     return (
         <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans select-none overflow-x-hidden">
@@ -1658,21 +1658,24 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 {(gameStatus === 'racing' ? realtimeRanks : [0, 1, 2, 3, 4, 5, 6, 7]).map((hIdx, rankIdx) => {
                                                     const h = HORSES_DATA[hIdx];
                                                     const isRacing = gameStatus === 'racing';
+                                                    const optText = currentRace.options[hIdx] || h.name;
+                                                    const optLen = optText.length;
+                                                    const textSize = optLen > 14 ? 'text-[10px] leading-tight' : optLen > 9 ? 'text-[11px] leading-tight' : 'text-xs leading-tight';
                                                     return (
-                                                        <div key={h.letter} className="flex items-center justify-between text-xs font-bold px-2 py-1.5 rounded-xl bg-black/60 border border-slate-800/80 shadow-sm">
-                                                            <div className="flex items-center gap-2 truncate flex-1 min-w-0">
+                                                        <div key={h.letter} className="flex items-center justify-between px-2 py-1 sm:py-1.5 rounded-xl bg-black/60 border border-slate-800/80 shadow-sm gap-1.5">
+                                                            <div className="flex items-center gap-1.5 flex-1 min-w-0">
                                                                 {isRacing && (
-                                                                    <span className={`w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center shrink-0 ${rankIdx === 0 ? 'bg-amber-400 text-slate-950' : rankIdx === 1 ? 'bg-slate-200 text-slate-950' : rankIdx === 2 ? 'bg-amber-700 text-white' : 'bg-slate-800 text-slate-300'}`}>
+                                                                    <span className={`w-4 h-4 sm:w-5 sm:h-5 rounded text-[10px] sm:text-[11px] font-black flex items-center justify-center shrink-0 ${rankIdx === 0 ? 'bg-amber-400 text-slate-950' : rankIdx === 1 ? 'bg-slate-200 text-slate-950' : rankIdx === 2 ? 'bg-amber-700 text-white' : 'bg-slate-800 text-slate-300'}`}>
                                                                         {rankIdx + 1}
                                                                     </span>
                                                                 )}
-                                                                <span className="w-5 h-5 rounded-md text-[11px] font-black flex items-center justify-center shrink-0 shadow-sm" style={chipStyle(h)}>
+                                                                <span className="w-4 h-4 sm:w-5 sm:h-5 rounded text-[10px] sm:text-[11px] font-black flex items-center justify-center shrink-0 shadow-sm" style={chipStyle(h)}>
                                                                     {h.letter}
                                                                 </span>
-                                                                <span className="text-white text-xs sm:text-sm font-black truncate">{currentRace.options[hIdx] || h.name}</span>
+                                                                <span className={`text-white font-bold break-words line-clamp-2 ${textSize}`}>{optText}</span>
                                                             </div>
-                                                            <span className="flex items-baseline gap-1 shrink-0 ml-2">
-                                                                <span className="font-mono text-xs sm:text-sm font-black text-amber-300">
+                                                            <span className="flex items-baseline shrink-0 ml-1">
+                                                                <span className="font-mono text-[11px] sm:text-xs font-black text-amber-300">
                                                                     {odds.counts[hIdx] ?? 0}票
                                                                 </span>
                                                             </span>

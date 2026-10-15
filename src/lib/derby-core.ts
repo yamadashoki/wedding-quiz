@@ -289,11 +289,11 @@ export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
   });
 
   s.horses.forEach(h => {
+    if (h.finished) return;
     h.laneX += (h.targetLaneX - h.laneX) * Math.min(1, dt * 3.5);
-    // ゴール通過後も急停止せず、奥へ走り抜ける
-    const runSpeed = h.finished ? Math.max(0.45, h.speed * 0.75) : h.speed;
-    h.z -= runSpeed * 34 * dt;
-    if (!h.finished && h.z <= FINISH_Z) {
+    h.z -= h.speed * 34 * dt;
+    if (h.z <= FINISH_Z) {
+      h.z = FINISH_Z;
       h.finished = true;
     }
   });
