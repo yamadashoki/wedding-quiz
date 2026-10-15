@@ -1089,6 +1089,23 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     }, [participants]);
 
+    const rankTiers = useMemo(() => {
+        const tiers: { rank: number; score: number; members: (Participant & { rank: number })[] }[] = [];
+        ranked.forEach(p => {
+            const last = tiers[tiers.length - 1];
+            if (last && last.score === p.score) {
+                last.members.push(p);
+            } else {
+                tiers.push({
+                    rank: p.rank,
+                    score: p.score,
+                    members: [p],
+                });
+            }
+        });
+        return tiers;
+    }, [ranked]);
+
     // --------------------------------------------------------------
     // ユーザー操作
     // --------------------------------------------------------------
@@ -1741,36 +1758,62 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                         <div className="my-auto py-3 sm:py-6 w-full max-w-5xl mx-auto flex flex-col items-center">
                                             <div className="w-full grid grid-cols-1 md:grid-cols-3 gap-4 lg:gap-6 items-end">
                                                 {([1, 0, 2] as const).map(slotIdx => {
-                                                    const u = ranked[slotIdx];
-                                                    const rank = u ? u.rank : (slotIdx === 0 ? 1 : slotIdx === 1 ? 2 : 3);
-                                                    const is1st = rank === 1;
-                                                    const is2nd = rank === 2;
+                                                    const tier = rankTiers[slotIdx];
+                                                    const rankNum = slotIdx === 0 ? 1 : slotIdx === 1 ? 2 : 3;
+                                                    const is1st = rankNum === 1;
+                                                    const is2nd = rankNum === 2;
                                                     const styles = is1st
-                                                        ? { box: `${slotIdx === 0 ? 'order-1 md:order-2' : 'order-2 md:order-1'} bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-amber-400 shadow-[0_0_45px_rgba(245,158,11,0.35)] md:h-[360px] md:-translate-y-4`, badge: 'w-16 h-16 bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 text-2xl', name: 'text-2xl sm:text-3xl lg:text-5xl', pt: 'text-3xl sm:text-5xl text-amber-300' }
+                                                        ? { box: 'order-1 md:order-2 bg-gradient-to-b from-amber-500/25 via-slate-900 to-slate-950 border-amber-400 shadow-[0_0_45px_rgba(245,158,11,0.35)] md:min-h-[360px] md:-translate-y-4', badge: 'w-16 h-16 bg-gradient-to-tr from-amber-500 to-yellow-300 text-slate-950 text-2xl', pt: 'text-3xl sm:text-5xl text-amber-300' }
                                                         : is2nd
-                                                            ? { box: 'order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-slate-300/80 md:h-[300px]', badge: 'w-12 h-12 bg-slate-300 text-slate-900 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-slate-200' }
-                                                            : { box: 'order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-amber-700/80 md:h-[280px]', badge: 'w-12 h-12 bg-amber-700 text-amber-100 text-xl', name: 'text-xl sm:text-2xl lg:text-3xl', pt: 'text-2xl sm:text-3xl text-amber-400' };
+                                                            ? { box: 'order-2 md:order-1 bg-gradient-to-b from-slate-800/90 to-slate-950 border-slate-300/80 md:min-h-[300px]', badge: 'w-12 h-12 bg-slate-300 text-slate-900 text-xl', pt: 'text-2xl sm:text-3xl text-slate-200' }
+                                                            : { box: 'order-3 bg-gradient-to-b from-amber-950/40 to-slate-950 border-amber-700/80 md:min-h-[280px]', badge: 'w-12 h-12 bg-amber-700 text-amber-100 text-xl', pt: 'text-2xl sm:text-3xl text-amber-400' };
+
+                                                    const members = tier?.members ?? [];
                                                     return (
-                                                        <div key={slotIdx} className={`${styles.box} border-2 rounded-2xl sm:rounded-3xl p-6 flex flex-col items-center shadow-xl relative justify-between transform`}>
+                                                        <div key={slotIdx} className={`${styles.box} border-2 rounded-2xl sm:rounded-3xl p-5 sm:p-6 flex flex-col items-center shadow-xl relative justify-between transform`}>
                                                             {is1st && <div className="absolute -top-7 inset-x-0 flex justify-center"><span className="text-4xl animate-bounce drop-shadow">👑</span></div>}
                                                             <div className={`${styles.badge} rounded-full flex items-center justify-center font-black shadow`}>
-                                                                {u ? `${u.rank}位` : `${slotIdx === 0 ? 1 : slotIdx === 1 ? 2 : 3}位`}
+                                                                {rankNum}位
                                                             </div>
-                                                            <div className="my-3 text-center w-full">
-                                                                <div className={`${styles.name} font-black text-white truncate px-2`}>{u ? u.name : '―'}</div>
+                                                            <div className="my-3 text-center w-full flex-1 flex flex-col items-center justify-center min-h-[90px]">
+                                                                {members.length === 0 ? (
+                                                                    <div className="text-2xl font-black text-slate-600">―</div>
+                                                                ) : members.length === 1 ? (
+                                                                    <div className={`${is1st ? 'text-2xl sm:text-3xl lg:text-4xl' : 'text-xl sm:text-2xl lg:text-3xl'} font-black text-white truncate px-2 max-w-full`}>
+                                                                        {members[0].name}
+                                                                    </div>
+                                                                ) : (
+                                                                    <div className="w-full flex flex-wrap items-center justify-center gap-1.5 max-h-36 overflow-y-auto px-1 py-1">
+                                                                        {members.map(m => (
+                                                                            <span
+                                                                                key={m.id}
+                                                                                className={`inline-flex items-center px-2.5 py-1 rounded-xl text-xs sm:text-sm font-black shadow-sm border ${
+                                                                                    is1st
+                                                                                        ? 'bg-amber-400/20 border-amber-300 text-amber-200'
+                                                                                        : is2nd
+                                                                                        ? 'bg-slate-800 border-slate-400 text-slate-100'
+                                                                                        : 'bg-amber-950/60 border-amber-600 text-amber-200'
+                                                                                }`}
+                                                                            >
+                                                                                {m.name}
+                                                                            </span>
+                                                                        ))}
+                                                                    </div>
+                                                                )}
                                                             </div>
-                                                            <div className="bg-slate-900/90 border border-slate-700 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner">
-                                                                <span className={`${styles.pt} font-black font-mono`}>{u ? u.score : 0} pt</span>
+                                                            <div className="bg-slate-900/90 border border-slate-700 px-6 py-2.5 rounded-2xl text-center w-full shadow-inner mt-2">
+                                                                <span className={`${styles.pt} font-black font-mono`}>{tier ? tier.score : 0} pt</span>
                                                             </div>
                                                         </div>
                                                     );
                                                 })}
                                             </div>
 
-                                            {ranked.length > 3 && (
+                                            {rankTiers.length > 3 && (
                                                 <div className="w-full mt-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-4 text-left shadow-lg">
-                                                    <div className="flex flex-wrap gap-2.5 max-h-32 overflow-y-auto">
-                                                        {ranked.slice(3).map((u) => (
+                                                    <div className="text-xs font-bold text-slate-400 mb-2 px-1">4位以下のランキング</div>
+                                                    <div className="flex flex-wrap gap-2.5 max-h-36 overflow-y-auto">
+                                                        {rankTiers.slice(3).flatMap(t => t.members).map((u) => (
                                                             <span key={u.id} className="inline-flex items-center gap-2.5 px-3.5 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-sm font-bold">
                                                                 <span className="font-mono text-slate-400">{u.rank}位</span>
                                                                 <span className="text-white">{u.name}</span>
