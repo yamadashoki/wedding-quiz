@@ -167,128 +167,195 @@ export function stepSim(s: SimState, order: BetOrder, raceIndex: number) {
   const others = Array.from({ length: OPTION_COUNT }, (_, i) => i).filter(i => !order.includes(i));
   const fourthIdx = others[(winnerIdx + secondIdx * 2 + thirdIdx * 3) % others.length];
 
+  // 全馬のZ座標からソートして現在の順位（0位〜7位）を算出
+  const currentRanks = s.horses
+    .map((h, i) => ({ i, z: h.z }))
+    .sort((a, b) => a.z - b.z); // zが小さいほど前（先頭）
+
+  const leaderIdx = currentRanks[0].i;
+  const leaderZ = currentRanks[0].z;
+  const secondZ = currentRanks[1]?.z ?? leaderZ;
+  const leadGap = secondZ - leaderZ; // 1位と2位の差（m）
+
+  // --- 【残り100mまで】：3馬身（約7.5m）のリードをつけて激しく抜いたり抜かれたり ---
+  const cycleTime = 3.2; // 周期約3.2秒ごとにチャレンジャー馬が交代
+  const phase = Math.floor(simTime / cycleTime);
+
+  // 先頭を奪いにいくチャレンジャー馬の順序（レース・シナリオに応じてバラバラ）
+  const challengerOrder = [
+    (raceIndex + 2) % OPTION_COUNT,
+    secondIdx,
+    (raceIndex * 3 + 5) % OPTION_COUNT,
+    fourthIdx,
+    (raceIndex * 2 + 1) % OPTION_COUNT,
+    (scenario === 3 ? winnerIdx : (raceIndex + 4) % OPTION_COUNT),
+    (scenario === 4 ? others[0] : (raceIndex * 5 + 3) % OPTION_COUNT),
+    winnerIdx
+  ];
+  const challengerIdx = challengerOrder[phase % challengerOrder.length];
+
   s.horses.forEach((h, idx) => {
     if (h.finished) return;
     const remain = h.z - FINISH_Z;
 
-    // 各馬固有のペースの波（道中の抜きつ抜かれつ）
-    const wave1 = Math.sin(simTime * 2.3 + idx * 1.85 + scenario * 0.7);
-    const wave2 = Math.cos(simTime * 1.45 + idx * 2.9);
-    const jitter = (wave1 * 0.16) + (wave2 * 0.08);
+    if (remain > 100) {
+      let spd = 1.15;
+      spd += Math.sin(simTime * 1.8 + idx * 1.5) * 0.04;
 
-    if (remain > 650) {
-      // 序盤：全馬が激しく競り合い
-      const base = 1.05 + jitter;
-      if (scenario === 3 && idx === winnerIdx) h.speed = 1.18 + jitter; // 逃げパターン
-      else if (scenario === 4 && idx === winnerIdx) h.speed = Math.max(0.9, 0.97 + jitter * 0.4); // 後方で脚をためる
-      else if (scenario === 7 && idx === secondIdx) h.speed = 1.17 + jitter * 0.5; // 先頭に立つ2着馬
-      else h.speed = Math.max(0.88, Math.min(1.25, base));
-    } else if (remain > 280) {
-      // 中盤：馬群が凝縮
-      const base = 1.08 + jitter;
-      if (scenario === 0) {
-        if (idx === winnerIdx) { h.targetLaneX = 14.0; h.speed = 1.20; }
-        else if (idx === secondIdx) h.speed = 1.15 + jitter;
-        else h.speed = base;
-      } else if (scenario === 1) {
-        if (idx === winnerIdx) { h.targetLaneX = -18.0; h.speed = 1.18; }
-        else if (idx === secondIdx) h.speed = 1.16 + jitter;
-        else h.speed = base;
-      } else if (scenario === 2) {
-        if (idx === winnerIdx) { h.targetLaneX = 3.5; h.speed = 1.22 + Math.sin(simTime * 3.0) * 0.06; }
-        else if (idx === secondIdx) { h.targetLaneX = -3.5; h.speed = 1.22 - Math.sin(simTime * 3.0) * 0.06; }
-        else h.speed = base;
-      } else if (scenario === 3) {
-        if (idx === winnerIdx) h.speed = 1.16 + Math.sin(simTime * 2.0) * 0.05;
-        else if (idx === secondIdx || idx === thirdIdx) h.speed = 1.18 + jitter;
-        else h.speed = base;
-      } else if (scenario === 4) {
-        // 最後方待機：1着馬だけ外を回らず後ろに控える
-        if (idx === winnerIdx) { h.targetLaneX = 2.0; h.speed = 1.00 + Math.sin(simTime * 2.2) * 0.02; }
-        else if (idx === secondIdx || idx === thirdIdx) h.speed = 1.14 + jitter * 0.6;
-        else h.speed = base;
-      } else if (scenario === 5) {
-        // 内と外に分かれて前を窺う
-        if (idx === winnerIdx) { h.targetLaneX = -10.0; h.speed = 1.17 + Math.sin(simTime * 2.6) * 0.03; }
-        else if (idx === secondIdx) { h.targetLaneX = 10.0; h.speed = 1.17 - Math.sin(simTime * 2.6) * 0.03; }
-        else h.speed = base;
-      } else if (scenario === 6) {
-        // 上位3頭＋食らいつく1頭が並走
-        if (idx === winnerIdx || idx === secondIdx || idx === thirdIdx || idx === fourthIdx) h.speed = 1.17 + Math.sin(simTime * 2.4 + idx) * 0.03;
-        else h.speed = base;
+      if (idx === leaderIdx) {
+        // 先頭馬：3馬身（7.5m）未満ならリードを広げ、3馬身開いたら息を入れて後続の追撃を待つ
+        if (leadGap < 7.5) {
+          spd += 0.18 * (1.0 - leadGap / 7.5);
+        } else {
+          spd -= 0.12;
+        }
+      } else if (idx === challengerIdx) {
+        // 追撃馬：一気に加速して先頭を捉えにいく
+        const distToLeader = h.z - leaderZ;
+        spd += 0.22 + Math.min(0.20, distToLeader * 0.04);
       } else {
-        // 7：2着馬が先頭、1着馬は外から追走
-        if (idx === secondIdx) { h.targetLaneX = -6.0; h.speed = 1.17; }
-        else if (idx === winnerIdx) { h.targetLaneX = 8.0; h.speed = 1.13; }
-        else if (idx === thirdIdx) h.speed = 1.14 + jitter * 0.5;
-        else h.speed = base;
+        // その他の馬：中団で抜きつ抜かれつ
+        const wave = Math.sin(simTime * 1.2 + idx * 2.3);
+        spd += wave * 0.08;
       }
-    } else {
-      // 最終直線：幹事指定の着順へドラマチックに収束
-      const tail = 0.94 + Math.sin(idx + simTime) * 0.04;
+
+      // シナリオに応じたコース取りと見せ場
       if (scenario === 0) {
-        if (idx === winnerIdx) { h.targetLaneX = 14.0; h.speed = 1.62; }
-        else if (idx === secondIdx) { h.targetLaneX = -4.0; h.speed = 1.30; }
-        else if (idx === thirdIdx) { h.targetLaneX = 4.0; h.speed = 1.20; }
+        if (remain < 500 && idx === winnerIdx) h.targetLaneX = 14.0; // 外ラチ側へ
+      } else if (scenario === 1) {
+        if (remain < 500 && idx === winnerIdx) h.targetLaneX = -18.0; // 内ラチ沿いへ
+      } else if (scenario === 2) {
+        if (remain < 400) {
+          if (idx === winnerIdx) h.targetLaneX = 3.5;
+          if (idx === secondIdx) h.targetLaneX = -3.5;
+        }
+      } else if (scenario === 3) {
+        // 逃げ粘り：序盤1着馬が3馬身逃げやすい
+        if (remain > 650 && idx === winnerIdx) spd += 0.12;
+      } else if (scenario === 4) {
+        // 最後方一気：残り320mまで後方（3〜4馬身後ろ）で待機し、第4コーナー手前から外を回って捲る
+        if (remain > 320 && idx === winnerIdx) {
+          spd = Math.min(spd, 1.02);
+        } else if (remain <= 320 && idx === winnerIdx) {
+          h.targetLaneX = 6.0;
+          spd += 0.32;
+        }
+      } else if (scenario === 5) {
+        if (remain < 450) {
+          if (idx === winnerIdx) h.targetLaneX = -10.0;
+          if (idx === secondIdx) h.targetLaneX = 10.0;
+        }
+      } else if (scenario === 6) {
+        if (remain < 350) {
+          const lanes = [-6.5, -2.2, 2.2, 6.5];
+          const slot = (winnerIdx + secondIdx) % 2 === 0 ? [1, 2, 0, 3] : [2, 1, 3, 0];
+          if (idx === winnerIdx) h.targetLaneX = lanes[slot[0]];
+          else if (idx === secondIdx) h.targetLaneX = lanes[slot[1]];
+          else if (idx === thirdIdx) h.targetLaneX = lanes[slot[2]];
+          else if (idx === fourthIdx) h.targetLaneX = lanes[slot[3]];
+        }
+      } else if (scenario === 7) {
+        if (remain > 300 && idx === secondIdx) spd += 0.12;
+        if (remain < 450 && idx === winnerIdx) h.targetLaneX = 8.0;
+      }
+
+      // 残り160m〜100m：上位3頭が先頭から射程圏内（2〜2.5馬身以内）に収まるようアシスト
+      if (remain <= 160) {
+        const gapToLead = h.z - leaderZ;
+        if (idx === winnerIdx && gapToLead > 4.5) spd += 0.25;
+        if (idx === secondIdx && gapToLead > 5.5) spd += 0.20;
+        if (idx === thirdIdx && gapToLead > 6.5) spd += 0.18;
+      }
+
+      h.speed = Math.max(0.85, Math.min(1.58, spd));
+    } else {
+      // --- 【残り100m以降】：幹事指定の着順へドラマチックに収束 ---
+      const tail = 1.08 + Math.sin(idx * 2 + simTime) * 0.04;
+
+      if (scenario === 0) {
+        // 大外一気炸裂
+        if (idx === winnerIdx) { h.targetLaneX = 14.0; h.speed = 1.88; }
+        else if (idx === secondIdx) { h.targetLaneX = -3.0; h.speed = 1.48; }
+        else if (idx === thirdIdx) { h.targetLaneX = 3.0; h.speed = 1.36; }
         else h.speed = tail;
       } else if (scenario === 1) {
-        if (idx === winnerIdx) { h.targetLaneX = -18.0; h.speed = 1.60; }
-        else if (idx === secondIdx) { h.targetLaneX = 6.0; h.speed = 1.32; }
-        else if (idx === thirdIdx) { h.targetLaneX = -2.0; h.speed = 1.22; }
+        // イン強襲炸裂
+        if (idx === winnerIdx) { h.targetLaneX = -18.0; h.speed = 1.85; }
+        else if (idx === secondIdx) { h.targetLaneX = 5.0; h.speed = 1.48; }
+        else if (idx === thirdIdx) { h.targetLaneX = -1.0; h.speed = 1.36; }
         else h.speed = tail;
       } else if (scenario === 2) {
-        if (idx === winnerIdx) { h.targetLaneX = 3.5; h.speed = 1.46 + Math.sin(simTime * 4.5) * 0.06 + (remain < 35 ? 0.12 : 0); }
-        else if (idx === secondIdx) { h.targetLaneX = -3.5; h.speed = 1.46 - Math.sin(simTime * 4.5) * 0.06; }
-        else if (idx === thirdIdx) { h.targetLaneX = 9.0; h.speed = 1.25; }
-        else h.speed = 0.92 + Math.sin(idx + simTime) * 0.04;
+        // 壮絶な一騎打ち
+        if (idx === winnerIdx) { h.targetLaneX = 3.5; h.speed = 1.62 + Math.sin(simTime * 6.0) * 0.05 + (remain < 30 ? 0.08 : 0); }
+        else if (idx === secondIdx) { h.targetLaneX = -3.5; h.speed = 1.62 - Math.sin(simTime * 6.0) * 0.05; }
+        else if (idx === thirdIdx) { h.targetLaneX = 8.0; h.speed = 1.38; }
+        else h.speed = tail;
       } else if (scenario === 3) {
-        if (idx === winnerIdx) { h.targetLaneX = 0; h.speed = 1.38; }
-        else if (idx === secondIdx) { h.targetLaneX = -4.5; h.speed = 1.36; }
-        else if (idx === thirdIdx) { h.targetLaneX = 4.5; h.speed = 1.33; }
-        else h.speed = 0.93 + Math.sin(idx + simTime) * 0.04;
+        // 必死の二枚腰
+        if (idx === winnerIdx) { h.targetLaneX = 0; h.speed = 1.60; }
+        else if (idx === secondIdx) { h.targetLaneX = -4.0; h.speed = 1.54; }
+        else if (idx === thirdIdx) { h.targetLaneX = 4.0; h.speed = 1.42; }
+        else h.speed = tail;
       } else if (scenario === 4) {
-        if (idx === winnerIdx) { h.targetLaneX = 6.0; h.speed = 1.82; }
-        else if (idx === secondIdx) { h.targetLaneX = -5.0; h.speed = 1.30; }
-        else if (idx === thirdIdx) { h.targetLaneX = 2.0; h.speed = 1.22; }
+        // 最後方からのごぼう抜き炸裂
+        if (idx === winnerIdx) { h.targetLaneX = 5.0; h.speed = 2.05; }
+        else if (idx === secondIdx) { h.targetLaneX = -4.0; h.speed = 1.48; }
+        else if (idx === thirdIdx) { h.targetLaneX = 2.0; h.speed = 1.36; }
         else h.speed = tail;
       } else if (scenario === 5) {
-        if (idx === winnerIdx) { h.targetLaneX = -9.0; h.speed = 1.46 + Math.sin(simTime * 5.0) * 0.05 + (remain < 30 ? 0.10 : 0); }
-        else if (idx === secondIdx) { h.targetLaneX = 9.0; h.speed = 1.46 - Math.sin(simTime * 5.0) * 0.05; }
-        else if (idx === thirdIdx) { h.targetLaneX = 0.0; h.speed = 1.24; }
+        // 内外の叩き合い
+        if (idx === winnerIdx) { h.targetLaneX = -9.0; h.speed = 1.62 + Math.sin(simTime * 6.0) * 0.05 + (remain < 30 ? 0.08 : 0); }
+        else if (idx === secondIdx) { h.targetLaneX = 9.0; h.speed = 1.62 - Math.sin(simTime * 6.0) * 0.05; }
+        else if (idx === thirdIdx) { h.targetLaneX = 0.0; h.speed = 1.38; }
         else h.speed = tail;
       } else if (scenario === 6) {
-        // 4頭が横一線（食らいつく4番手は、ゴール前で着順補正により半馬身遅れる）
+        // 4頭横一線デッドヒート
         const lanes = [-6.5, -2.2, 2.2, 6.5];
-        const slot = (winnerIdx + secondIdx) % 2 === 0 ? [1, 2, 0, 3] : [2, 1, 3, 0]; // 組み合わせで並び方が変わる
-        if (idx === winnerIdx) { h.targetLaneX = lanes[slot[0]]; h.speed = 1.42 + (remain < 40 ? 0.10 : 0); }
-        else if (idx === secondIdx) { h.targetLaneX = lanes[slot[1]]; h.speed = 1.42; }
-        else if (idx === thirdIdx) { h.targetLaneX = lanes[slot[2]]; h.speed = 1.40; }
-        else if (idx === fourthIdx) { h.targetLaneX = lanes[slot[3]]; h.speed = 1.41; }
+        const slot = (winnerIdx + secondIdx) % 2 === 0 ? [1, 2, 0, 3] : [2, 1, 3, 0];
+        if (idx === winnerIdx) { h.targetLaneX = lanes[slot[0]]; h.speed = 1.56 + (remain < 30 ? 0.08 : 0); }
+        else if (idx === secondIdx) { h.targetLaneX = lanes[slot[1]]; h.speed = 1.54; }
+        else if (idx === thirdIdx) { h.targetLaneX = lanes[slot[2]]; h.speed = 1.50; }
+        else if (idx === fourthIdx) { h.targetLaneX = lanes[slot[3]]; h.speed = 1.45; }
         else h.speed = tail;
       } else {
-        // 7：直線入口で、外から来た1着馬が先頭を奪う
-        if (idx === winnerIdx) { h.targetLaneX = 1.0; h.speed = 1.62; }
-        else if (idx === secondIdx) { h.targetLaneX = -7.0; h.speed = 1.38; }
-        else if (idx === thirdIdx) { h.targetLaneX = -2.5; h.speed = 1.26; }
+        // 7：先頭交代
+        if (idx === winnerIdx) { h.targetLaneX = 1.0; h.speed = 1.82; }
+        else if (idx === secondIdx) { h.targetLaneX = -6.0; h.speed = 1.50; }
+        else if (idx === thirdIdx) { h.targetLaneX = -2.0; h.speed = 1.38; }
         else h.speed = tail;
+      }
+
+      // 1着馬が前にいる馬を差し切るアシスト
+      if (idx === winnerIdx) {
+        const lead = Math.min(...s.horses.map(other => other.z));
+        if (h.z > lead) {
+          h.speed += Math.min(0.65, (h.z - lead) * 0.14);
+        }
       }
     }
-
   });
 
-  // ゴール前220mは「指定着順どおりに入線する」ことを保証する。
-  // 下位の馬が上位の馬に並びかけたら、わずかに失速させて「ハナ差」で決着させる
-  // （一騎打ちパターンで2着馬が先着してしまう不具合の対策）
-  const rankOfIdx = (i: number) => (i === winnerIdx ? 0 : i === secondIdx ? 1 : i === thirdIdx ? 2 : 3);
-  const byRank = [winnerIdx, secondIdx, thirdIdx];
+  // --- 【残り100mから着順補正が働く】 ---
+  // 指定順位：1着=winner, 2着=second, 3着=third, 4着以降=others
+  const targetRanks = [winnerIdx, secondIdx, thirdIdx, ...others];
   s.horses.forEach((h, idx) => {
-    if (h.finished) return;
-    const r = rankOfIdx(idx);
-    if (r === 0 || h.z - FINISH_Z > 220) return;
-    const ref = s.horses[byRank[Math.min(r, 3) - 1]];
-    const gap = r === 1 ? 0.6 : 1.2; // 1着と2着は鼻差、それ以下は少し離す
-    const lead = ref.z + gap - h.z;  // 正の値＝前に出すぎている距離
-    if (!ref.finished && lead >= 0) h.speed = Math.min(h.speed, ref.speed * (0.96 - Math.min(0.3, lead * 0.03)));
+    if (h.finished || h.z - FINISH_Z > 100) return; // 残り100mから着順補正発動
+
+    const myRank = targetRanks.indexOf(idx); // 0 = 1着, 1 = 2着, 2 = 3着, ...
+    if (myRank === 0) return; // 1着馬は補正不要
+
+    // 自分より上位の全馬の前には絶対に出てはならない
+    for (let higherRank = 0; higherRank < myRank; higherRank++) {
+      const higherIdx = targetRanks[higherRank];
+      const higherHorse = s.horses[higherIdx];
+      // 1着と2着はハナ差0.6m、2着と3着は1.0m、それ以外は1.4m
+      const minGap = (higherRank === 0 && myRank === 1) ? 0.6 : (myRank === 2 ? 1.0 : 1.4);
+      const targetZ = higherHorse.z + minGap;
+      const lead = targetZ - h.z; // 正＝上位馬より前に出すぎている
+      if (!higherHorse.finished && lead >= 0) {
+        h.speed = Math.min(h.speed, higherHorse.speed * Math.max(0.35, 0.80 - lead * 0.15));
+      }
+    }
   });
 
   s.horses.forEach(h => {
