@@ -66,6 +66,15 @@ const AlertTriangle = (p: IconProps) => (
         <path d="M12 17h.01" />
     </IconBase>
 );
+const Trophy = (p: IconProps) => (
+    <IconBase {...p}>
+        <path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6" />
+        <path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18" />
+        <path d="M4 22h16" />
+        <path d="M10 14.66V17c0 .55-.45 1-1 1H7v4h10v-4h-2c-.55 0-1-.45-1-1v-2.34" />
+        <path d="M18 4H6v7a6 6 0 0 0 12 0V4Z" />
+    </IconBase>
+);
 
 // ==============================================================
 // 型定義
@@ -1143,10 +1152,24 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     };
 
+    const openGrandFinale = () => void runHost('set_status', { status: 'grand_finale' });
+    const closeGrandFinale = () => void runHost('set_status', { status: 'result' });
+    const triggerGrandFinale = () => {
+        confirm({
+            title: '総合結果の表彰画面へ進みますか？',
+            message: 'スクリーンと全参加者の画面に総合順位と表彰画面を表示します。',
+            confirmLabel: '結果発表へ！',
+            onConfirm: () => {
+                closeConfirm();
+                openGrandFinale();
+            }
+        });
+    };
+
     const nextRace = () => {
         const nextIdx = currentRaceIndex + 1;
         if (nextIdx >= races.length) {
-            openGrandFinale();
+            triggerGrandFinale();
             return;
         }
         confirm({
@@ -1198,8 +1221,6 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
         });
     };
 
-    const openGrandFinale = () => void runHost('set_status', { status: 'grand_finale' });
-    const closeGrandFinale = () => void runHost('set_status', { status: 'result' });
 
     const draftDirty = draftRaces !== null;
     const activeEditRace = (draftRaces ?? races)[editRaceIndex] || currentRace;
@@ -1329,7 +1350,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                     <span className="font-black text-amber-400">ウェディングサンレンタン！</span>
                                     {loaded && (
                                         <span className="bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] px-2 py-0.5 rounded font-mono">
-                                            第{currentRaceIndex + 1}R / 全{races.length}R
+                                            第{currentRaceIndex + 1}レース
                                         </span>
                                     )}
                                 </div>
@@ -1464,7 +1485,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
 
                                         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-3 space-y-1.5">
                                             <div className="flex items-center justify-between text-[11px] font-mono">
-                                                <span className="text-amber-400 font-bold">第{currentRaceIndex + 1}レース / 全{races.length}R</span>
+                                                <span className="text-amber-400 font-bold">第{currentRaceIndex + 1}レース</span>
                                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${gameStatus === 'idle' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' : gameStatus === 'racing' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse' : 'bg-slate-800 text-slate-400'}`}>
                                                     {gameStatus === 'idle' ? '投票受付中' : gameStatus === 'racing' ? '出走中！' : '着順確定'}
                                                 </span>
@@ -1614,7 +1635,7 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             <span className="text-2xl sm:text-3xl shrink-0">🏇</span>
                                             <div className="min-w-0 flex-1">
                                                 <div className="text-[10px] sm:text-xs text-amber-400 font-black tracking-widest uppercase">
-                                                    RACE {currentRaceIndex + 1} / 全{races.length}R
+                                                    第{currentRaceIndex + 1}レース
                                                 </div>
                                                 {(() => {
                                                     const nameLen = (currentRace.name || '').length;
@@ -1930,13 +1951,23 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                                 )}
 
                                                 {gameStatus === 'result' && (
-                                                    <button
-                                                        onClick={nextRace}
-                                                        disabled={hostBusy}
-                                                        className="w-full py-3 rounded-xl font-black text-sm bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 shadow-lg flex items-center justify-center gap-2"
-                                                    >
-                                                        <span>{currentRaceIndex + 1 < races.length ? `第${currentRaceIndex + 2}レースの受付を開始` : '総合結果の表彰へ！'}</span>
-                                                    </button>
+                                                    <div className="space-y-2">
+                                                        <button
+                                                            onClick={nextRace}
+                                                            disabled={hostBusy}
+                                                            className="w-full py-3 rounded-xl font-black text-sm bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 shadow-lg flex items-center justify-center gap-2"
+                                                        >
+                                                            <span>{currentRaceIndex + 1 < races.length ? `第${currentRaceIndex + 2}レースの受付を開始` : '第' + (currentRaceIndex + 2) + 'レースへ'}</span>
+                                                        </button>
+                                                        <button
+                                                            onClick={triggerGrandFinale}
+                                                            disabled={hostBusy}
+                                                            className="w-full py-2.5 rounded-xl font-black text-xs bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-md flex items-center justify-center gap-1.5"
+                                                        >
+                                                            <Trophy className="w-3.5 h-3.5 text-amber-300" />
+                                                            <span>総合結果の表彰へ進む！</span>
+                                                        </button>
+                                                    </div>
                                                 )}
 
                                                 {gameStatus === 'grand_finale' && (
@@ -1992,23 +2023,34 @@ export default function DerbyApp({ role = 'multiview', homeHref = '/', basePath 
                                             </div>
 
                                             <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
-                                                <div className="text-xs font-bold text-slate-300">レース切り替え</div>
+                                                <div className="flex items-center justify-between text-xs">
+                                                    <span className="font-bold text-slate-300">レース切り替え</span>
+                                                    <span className="text-[11px] font-mono font-bold text-amber-400">第{currentRaceIndex + 1}レース</span>
+                                                </div>
                                                 <div className="grid grid-cols-2 gap-2">
                                                     <button
                                                         onClick={prevRace}
                                                         disabled={currentRaceIndex <= 0 || hostBusy}
-                                                        className="py-2 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 disabled:opacity-40"
+                                                        className="py-2 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 hover:text-white disabled:opacity-40 transition-all"
                                                     >
                                                         ← 前のレース
                                                     </button>
                                                     <button
                                                         onClick={nextRace}
                                                         disabled={hostBusy}
-                                                        className="py-2 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 disabled:opacity-40"
+                                                        className="py-2 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 hover:text-white disabled:opacity-40 transition-all"
                                                     >
                                                         次のレース →
                                                     </button>
                                                 </div>
+                                                <button
+                                                    onClick={triggerGrandFinale}
+                                                    disabled={hostBusy || gameStatus === 'racing'}
+                                                    className="w-full py-2.5 rounded-lg text-xs font-black bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-md shadow-indigo-900/30 flex items-center justify-center gap-1.5 transition-all"
+                                                >
+                                                    <Trophy className="w-3.5 h-3.5 text-amber-300" />
+                                                    <span>🏆 結果発表へ（総合表彰）</span>
+                                                </button>
                                                 {gameStatus !== 'idle' && (
                                                     <button
                                                         onClick={resetCurrentRace}
